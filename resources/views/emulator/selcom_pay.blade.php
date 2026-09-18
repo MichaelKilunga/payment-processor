@@ -1,236 +1,180 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="h-full">
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Selcom Checkout — Emulator</title>
+    <title>Selcom Secure Checkout — Gateway Simulator</title>
+    
+    <!-- Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=JetBrains+Mono:wght@600&display=swap" rel="stylesheet" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600;700&display=swap" rel="stylesheet" />
+
+    @if (file_exists(public_path('build/manifest.json')) || file_exists(public_path('hot')))
+        @vite(['resources/css/app.css', 'resources/js/app.js'])
+    @endif
+
     <style>
-        :root {
-            --selcom: #00c6a2;
-            --selcom-dark: #009e82;
-            --bg: #0b1419;
-            --card: #111c23;
-            --border: rgba(255,255,255,0.08);
-            --text: #e8ecf4;
-            --muted: #7a90a0;
-        }
-        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-        body {
-            font-family: 'Inter', sans-serif;
-            background: var(--bg);
-            color: var(--text);
-            min-height: 100vh;
-            display: flex; flex-direction: column; align-items: center; justify-content: center;
-            padding: 24px;
-        }
-        body::before {
-            content: '';
-            position: fixed; top: 0; left: 0; right: 0; height: 300px;
-            background: linear-gradient(180deg, rgba(0,198,162,0.08) 0%, transparent 100%);
-            pointer-events: none;
-        }
-        .page-card {
-            background: var(--card);
-            border: 1px solid var(--border);
-            border-radius: 20px;
-            max-width: 440px; width: 100%;
-            overflow: hidden;
-            box-shadow: 0 16px 64px rgba(0,0,0,0.5);
-            position: relative;
-        }
-        .page-header {
-            background: linear-gradient(135deg, #00c6a2, #007d68);
-            padding: 28px 28px 24px;
-            text-align: center;
-        }
-        .page-logo { font-size: 28px; font-weight: 800; letter-spacing: -1px; color: #fff; }
-        .page-logo span { color: rgba(255,255,255,0.6); }
-        .page-header-sub { font-size: 12px; color: rgba(255,255,255,0.7); margin-top: 4px; }
-        .page-body { padding: 28px; }
-        .merchant-name { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
-        .amount-display {
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 40px; font-weight: 700;
-            color: var(--selcom);
-            margin-bottom: 4px;
-        }
-        .amount-label { font-size: 12px; color: var(--muted); margin-bottom: 20px; }
-        .info-row {
-            display: flex; justify-content: space-between; align-items: center;
-            padding: 10px 0;
-            border-bottom: 1px solid var(--border);
-            font-size: 13px;
-        }
-        .info-row:last-of-type { border-bottom: none; }
-        .info-label { color: var(--muted); }
-        .info-value { font-weight: 600; font-family: 'JetBrains Mono', monospace; font-size: 12px; }
-        .divider { border: none; border-top: 1px solid var(--border); margin: 20px 0; }
-        .action-group { display: flex; flex-direction: column; gap: 10px; }
-        .btn {
-            width: 100%; padding: 14px; border-radius: 10px;
-            font-family: inherit; font-size: 14px; font-weight: 700;
-            border: none; cursor: pointer; transition: all 0.2s;
-        }
-        .btn-pay {
-            background: linear-gradient(135deg, var(--selcom), var(--selcom-dark));
-            color: #fff;
-        }
-        .btn-pay:hover { filter: brightness(1.1); transform: translateY(-1px); }
-        .btn-cancel {
-            background: rgba(255,255,255,0.04); color: var(--muted);
-            border: 1px solid var(--border);
-        }
-        .btn-cancel:hover { background: rgba(255,255,255,0.08); color: var(--text); }
-        .secure-badge {
-            text-align: center; font-size: 11px; color: var(--muted);
-            margin-top: 16px; display: flex; align-items: center; justify-content: center; gap: 5px;
-        }
-        .status-overlay {
-            position: fixed; inset: 0; z-index: 999;
-            background: rgba(0,0,0,0.7); backdrop-filter: blur(12px);
-            display: none; align-items: center; justify-content: center;
-        }
-        .status-box {
-            text-align: center; padding: 40px;
-        }
-        .status-icon { font-size: 64px; margin-bottom: 16px; }
-        .status-title { font-size: 22px; font-weight: 800; margin-bottom: 8px; }
-        .status-msg { font-size: 14px; color: var(--muted); }
-        .spinner {
-            width: 40px; height: 40px;
-            border: 3px solid rgba(255,255,255,0.1);
-            border-top-color: var(--selcom);
-            border-radius: 50%;
-            animation: spin 0.8s linear infinite;
-            margin: 0 auto 16px;
-        }
-        @keyframes spin { to { transform: rotate(360deg); } }
-        .emulator-notice {
-            background: rgba(0,198,162,0.06);
-            border: 1px solid rgba(0,198,162,0.2);
-            border-radius: 8px;
-            padding: 10px 14px;
-            font-size: 11px;
-            color: rgba(0,198,162,0.8);
-            margin-bottom: 20px;
-        }
+        body { font-family: 'Plus Jakarta Sans', sans-serif; }
+        .font-mono { font-family: 'JetBrains Mono', monospace; }
     </style>
 </head>
-<body>
+<body class="h-full bg-slate-950 text-slate-100 flex flex-col items-center justify-center p-4 antialiased">
 
-<div class="page-card">
-    <div class="page-header">
-        <div class="page-logo">Sel<span>com</span></div>
-        <div class="page-header-sub">Secure Payment Gateway</div>
-    </div>
-    <div class="page-body">
+    <!-- Background Ambient Shield -->
+    <div class="fixed inset-0 pointer-events-none bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-emerald-950/20 via-slate-950 to-slate-950"></div>
 
-        <div class="emulator-notice">
-            🧪 <strong>Emulator Mode</strong> — This is a simulated Selcom checkout page.
-            Use the Approve/Reject buttons below to simulate customer action.
-        </div>
-
-        <div class="merchant-name">Amount Due</div>
-        <div class="amount-display">
-            TZS {{ number_format($transaction?->amount ?? 0, 0) }}
-        </div>
-        <div class="amount-label">Tanzanian Shillings</div>
-
-        <div class="info-row">
-            <span class="info-label">Order Reference</span>
-            <span class="info-value">{{ $orderId }}</span>
-        </div>
-        <div class="info-row">
-            <span class="info-label">Customer</span>
-            <span class="info-value">{{ $transaction?->buyer_name ?? 'Customer' }}</span>
-        </div>
-        <div class="info-row">
-            <span class="info-label">Phone</span>
-            <span class="info-value">{{ $transaction?->phone ?? '—' }}</span>
-        </div>
-        <div class="info-row">
-            <span class="info-label">Status</span>
-            <span class="info-value" style="color: {{ $transaction?->status === 'approved' ? '#00c6a2' : ($transaction?->status === 'rejected' ? '#fc6c6c' : '#fbbf24') }}">
-                {{ strtoupper($transaction?->status ?? 'UNKNOWN') }}
-            </span>
-        </div>
-
-        <hr class="divider" />
-
-        @if(($transaction?->status ?? 'pending') === 'pending')
-            <div class="action-group">
-                <button class="btn btn-pay" onclick="handleAction('approve')">
-                    ✅ Confirm & Pay
-                </button>
-                <button class="btn btn-cancel" onclick="handleAction('reject')">
-                    ✗ Cancel Payment
-                </button>
+    <!-- Main Checkout Modal Card -->
+    <div class="relative w-full max-w-md bg-slate-900 border border-slate-800 rounded-3xl shadow-2xl overflow-hidden">
+        
+        <!-- Header Banner -->
+        <div class="bg-gradient-to-r from-emerald-600 to-teal-700 p-6 text-center text-white relative">
+            <div class="flex items-center justify-center space-x-2">
+                <svg class="w-7 h-7 text-emerald-200" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751A11.959 11.959 0 0112 2.714z" />
+                </svg>
+                <span class="text-2xl font-extrabold tracking-tight">Selcom<span class="text-emerald-200 font-normal">Pay</span></span>
             </div>
-        @else
-            <div style="text-align:center;padding:20px 0;font-size:16px;font-weight:600;color:var(--muted)">
-                This transaction has already been {{ $transaction?->status ?? 'processed' }}.
-            </div>
-        @endif
+            <p class="text-xs text-emerald-100/80 mt-1 font-medium">Enterprise Mobile Money Checkout</p>
+        </div>
 
-        <div class="secure-badge">
-            🔒 256-bit SSL Encrypted • Emulator Sandbox
+        <!-- Body Content -->
+        <div class="p-6 space-y-6">
+            
+            <!-- Sandbox Notice -->
+            <div class="p-3.5 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-300 text-xs flex items-center space-x-2">
+                <svg class="w-4 h-4 shrink-0 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z" />
+                </svg>
+                <span><strong>Sandbox Simulator Mode</strong> — Simulate customer payment authorization below.</span>
+            </div>
+
+            <!-- Amount Display Card -->
+            <div class="text-center py-4 bg-slate-950/60 rounded-2xl border border-slate-800">
+                <span class="text-xs uppercase tracking-wider text-slate-400 font-bold block mb-1">Total Amount Due</span>
+                <div class="text-4xl font-extrabold text-emerald-400 font-mono tracking-tight">
+                    TZS {{ number_format($transaction?->amount ?? 0, 0) }}
+                </div>
+                <span class="text-xs text-slate-500 mt-1 block">Tanzanian Shillings</span>
+            </div>
+
+            <!-- Order Details Table -->
+            <div class="space-y-2 text-xs font-mono border-t border-b border-slate-800 py-4">
+                <div class="flex justify-between items-center text-slate-400">
+                    <span>Order Reference</span>
+                    <span class="text-white font-bold">{{ $orderId }}</span>
+                </div>
+                <div class="flex justify-between items-center text-slate-400">
+                    <span>Customer Name</span>
+                    <span class="text-white font-bold">{{ $transaction?->buyer_name ?? 'Customer' }}</span>
+                </div>
+                <div class="flex justify-between items-center text-slate-400">
+                    <span>Phone Number</span>
+                    <span class="text-white font-bold">{{ $transaction?->phone ?? '—' }}</span>
+                </div>
+                <div class="flex justify-between items-center text-slate-400">
+                    <span>Status</span>
+                    <span class="font-bold px-2 py-0.5 rounded text-[11px] {{ ($transaction?->status ?? 'pending') === 'approved' ? 'bg-emerald-500/20 text-emerald-400' : (($transaction?->status ?? 'pending') === 'rejected' ? 'bg-rose-500/20 text-rose-400' : 'bg-amber-500/20 text-amber-400') }}">
+                        {{ strtoupper($transaction?->status ?? 'PENDING') }}
+                    </span>
+                </div>
+            </div>
+
+            <!-- Action Buttons -->
+            @if(($transaction?->status ?? 'pending') === 'pending')
+                <div class="space-y-3">
+                    <button type="button" 
+                            onclick="handleAction('approve')" 
+                            class="w-full py-3.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm transition-all shadow-lg flex items-center justify-center space-x-2">
+                        <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+                        </svg>
+                        <span>Confirm & Authorize Payment</span>
+                    </button>
+
+                    <button type="button" 
+                            onclick="handleAction('reject')" 
+                            class="w-full py-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold text-xs transition-all border border-slate-700 flex items-center justify-center space-x-2">
+                        <svg class="w-4 h-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                        <span>Cancel Payment Request</span>
+                    </button>
+                </div>
+            @else
+                <div class="text-center py-3 text-xs text-slate-400 bg-slate-950/40 rounded-xl border border-slate-800">
+                    This order has already been <strong class="text-white">{{ $transaction?->status ?? 'processed' }}</strong>.
+                </div>
+            @endif
+
+            <!-- Security Footer -->
+            <div class="text-center text-[11px] text-slate-500 flex items-center justify-center space-x-1.5 pt-2">
+                <svg class="w-3.5 h-3.5 text-slate-400" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z" />
+                </svg>
+                <span>256-Bit SSL Encrypted &bull; Selcom Gateway Simulator</span>
+            </div>
+
+        </div>
+
+    </div>
+
+    <!-- Processing Overlay Dialog -->
+    <div id="overlay" class="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-md hidden items-center justify-center p-4">
+        <div class="bg-slate-900 border border-slate-800 rounded-3xl p-8 max-w-sm w-full text-center space-y-4 shadow-2xl" id="overlayContent">
+            <div class="w-10 h-10 border-4 border-slate-700 border-t-emerald-400 rounded-full animate-spin mx-auto"></div>
+            <h3 class="text-lg font-bold text-white">Processing Payment…</h3>
+            <p class="text-xs text-slate-400">Verifying customer credentials with Selcom Gateway.</p>
         </div>
     </div>
-</div>
 
-<!-- Processing overlay -->
-<div class="status-overlay" id="overlay">
-    <div class="status-box" id="overlayContent">
-        <div class="spinner"></div>
-        <div class="status-title">Processing…</div>
-        <div class="status-msg">Please wait while we confirm your payment.</div>
-    </div>
-</div>
+    <script>
+        async function handleAction(action) {
+            const overlay = document.getElementById('overlay');
+            overlay.classList.remove('hidden');
+            overlay.classList.add('flex');
 
-<script>
-async function handleAction(action) {
-    const overlay = document.getElementById('overlay');
-    overlay.style.display = 'flex';
+            try {
+                const txId = {{ $transaction?->id ?? 'null' }};
+                if (!txId) {
+                    showResult('error', 'Transaction Not Found', 'Could not locate transaction record.');
+                    return;
+                }
 
-    try {
-        const txId = {{ $transaction?->id ?? 'null' }};
-        if (!txId) {
-            showResult('error', '❌', 'Transaction Not Found', 'Could not find this transaction in the emulator.');
-            return;
-        }
+                const res = await fetch(`/api/emulator/resolve/${txId}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                    body: JSON.stringify({ action }),
+                });
+                const data = await res.json();
 
-        const res = await fetch(`/api/emulator/resolve/${txId}`, {
-            method:  'POST',
-            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-            body:    JSON.stringify({ action }),
-        });
-        const data = await res.json();
-
-        if (data.success) {
-            if (action === 'approve') {
-                showResult('success', '✅', 'Payment Successful!', 'Your payment has been confirmed. You may close this tab.');
-            } else {
-                showResult('cancelled', '❌', 'Payment Cancelled', 'You cancelled this payment. You may close this tab.');
+                if (data.success) {
+                    if (action === 'approve') {
+                        showResult('success', 'Payment Successful', 'Payment confirmed. Callback webhook sent to processor.');
+                    } else {
+                        showResult('cancelled', 'Payment Cancelled', 'You cancelled this payment order.');
+                    }
+                } else {
+                    showResult('error', 'Error Processing', data.error || 'Failed resolving payment.');
+                }
+            } catch (err) {
+                showResult('error', 'Network Error', err.message);
             }
-        } else {
-            showResult('error', '⚠️', 'Error', data.error || 'An error occurred.');
         }
-    } catch (err) {
-        showResult('error', '⚠️', 'Network Error', err.message);
-    }
-}
 
-function showResult(type, icon, title, msg) {
-    const colors = { success: '#00c6a2', cancelled: '#fc6c6c', error: '#fbbf24' };
-    document.getElementById('overlayContent').innerHTML = `
-        <div class="status-icon">${icon}</div>
-        <div class="status-title" style="color:${colors[type] || '#fff'}">${title}</div>
-        <div class="status-msg">${msg}</div>
-    `;
-}
-</script>
-
+        function showResult(type, title, msg) {
+            const isSuccess = type === 'success';
+            document.getElementById('overlayContent').innerHTML = `
+                <div class="w-12 h-12 rounded-2xl ${isSuccess ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-rose-500/20 text-rose-400 border border-rose-500/30'} flex items-center justify-center mx-auto">
+                    <svg class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor">
+                        ${isSuccess ? '<path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5" />' : '<path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />'}
+                    </svg>
+                </div>
+                <h3 class="text-lg font-bold ${isSuccess ? 'text-emerald-400' : 'text-rose-400'}">${title}</h3>
+                <p class="text-xs text-slate-300 font-mono">${msg}</p>
+                <button type="button" onclick="window.close()" class="mt-4 px-4 py-2 rounded-xl bg-slate-800 text-slate-300 text-xs font-semibold hover:bg-slate-700">Close Window</button>
+            `;
+        }
+    </script>
 </body>
 </html>

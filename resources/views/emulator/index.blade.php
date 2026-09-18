@@ -1,861 +1,477 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Payment Emulator — Sandbox</title>
-    <meta name="description" content="Simulated payment gateway emulator for testing Selcom and AzamPay payment flows end-to-end without real credentials." />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
+@extends('layouts.app')
 
-    <style>
-        /* ─── Design Tokens ─────────────────────────────────────── */
-        :root {
-            --bg:           #0d0f17;
-            --bg-card:      #13161f;
-            --bg-elevated:  #1a1d2a;
-            --border:       rgba(255,255,255,0.07);
-            --border-glow:  rgba(99,179,237,0.25);
-            --text:         #e8ecf4;
-            --text-muted:   #7a84a0;
-            --text-dim:     #4a5270;
-            --primary:      #63b3ed;
-            --primary-dark: #3a86c8;
-            --success:      #48d890;
-            --success-bg:   rgba(72,216,144,0.10);
-            --danger:       #fc6c6c;
-            --danger-bg:    rgba(252,108,108,0.10);
-            --warning:      #fbbf24;
-            --warning-bg:   rgba(251,191,36,0.10);
-            --selcom:       #00c6a2;
-            --azampay:      #7c5cbf;
-            --radius:       14px;
-            --radius-sm:    8px;
-            --shadow:       0 8px 32px rgba(0,0,0,0.45);
-        }
+@section('title', 'Developer Sandbox — Payment Gateway Emulator')
 
-        /* ─── Reset ─────────────────────────────────────────────── */
-        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-        html { scroll-behavior: smooth; }
-        body {
-            font-family: 'Inter', sans-serif;
-            background: var(--bg);
-            color: var(--text);
-            min-height: 100vh;
-            overflow-x: hidden;
-        }
+@section('content')
+<div class="py-8 bg-slate-900 text-slate-100 min-h-[calc(100vh-4rem)]">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        
+        <!-- Header & Sandbox Title -->
+        <div class="md:flex md:items-center md:justify-between mb-8 pb-6 border-b border-slate-800">
+            <div class="min-w-0 flex-1">
+                <div class="flex items-center space-x-3">
+                    <div class="w-10 h-10 rounded-xl bg-sky-500/10 border border-sky-500/20 flex items-center justify-center text-sky-400 shadow-sm">
+                        <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M17.25 6.75L22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3l-4.5 16.5" />
+                        </svg>
+                    </div>
+                    <div>
+                        <h1 class="text-2xl font-bold tracking-tight text-white sm:text-3xl">
+                            Developer Gateway Sandbox
+                        </h1>
+                        <p class="text-xs sm:text-sm text-slate-400 mt-0.5">
+                            Simulate mobile money payment flows, test USSD pushes, and verify webhook callbacks end-to-end.
+                        </p>
+                    </div>
+                </div>
+            </div>
 
-        /* ─── Ambient Glow Background ────────────────────────────── */
-        body::before {
-            content: '';
-            position: fixed;
-            top: -200px; left: 50%;
-            transform: translateX(-50%);
-            width: 900px; height: 600px;
-            background: radial-gradient(ellipse at center,
-                rgba(99,179,237,0.06) 0%,
-                rgba(124,92,191,0.04) 50%,
-                transparent 70%);
-            pointer-events: none;
-            z-index: 0;
-        }
-
-        /* ─── Header ─────────────────────────────────────────────── */
-        .header {
-            position: sticky; top: 0; z-index: 100;
-            background: rgba(13,15,23,0.85);
-            backdrop-filter: blur(20px);
-            border-bottom: 1px solid var(--border);
-            padding: 0 32px;
-            display: flex; align-items: center; justify-content: space-between;
-            height: 64px;
-        }
-        .header-brand {
-            display: flex; align-items: center; gap: 12px;
-        }
-        .header-icon {
-            width: 36px; height: 36px;
-            background: linear-gradient(135deg, var(--primary), var(--azampay));
-            border-radius: 10px;
-            display: flex; align-items: center; justify-content: center;
-            font-size: 18px;
-        }
-        .header-title { font-size: 17px; font-weight: 700; letter-spacing: -0.3px; }
-        .header-sub   { font-size: 11px; color: var(--text-muted); margin-top: 1px; }
-        .header-badge {
-            background: rgba(72,216,144,0.15);
-            color: var(--success);
-            border: 1px solid rgba(72,216,144,0.25);
-            padding: 4px 12px;
-            border-radius: 99px;
-            font-size: 11px;
-            font-weight: 600;
-            letter-spacing: 0.5px;
-            display: flex; align-items: center; gap: 6px;
-        }
-        .pulse-dot {
-            width: 7px; height: 7px;
-            border-radius: 50%;
-            background: var(--success);
-            animation: pulse 1.8s ease-in-out infinite;
-        }
-        @keyframes pulse {
-            0%, 100% { opacity: 1; transform: scale(1); }
-            50%       { opacity: 0.4; transform: scale(0.75); }
-        }
-
-        /* ─── Layout ─────────────────────────────────────────────── */
-        .layout {
-            position: relative; z-index: 1;
-            max-width: 1400px; margin: 0 auto;
-            padding: 28px 24px;
-            display: grid;
-            grid-template-columns: 380px 1fr;
-            gap: 24px;
-            align-items: start;
-        }
-        @media (max-width: 960px) {
-            .layout { grid-template-columns: 1fr; }
-        }
-
-        /* ─── Cards ──────────────────────────────────────────────── */
-        .card {
-            background: var(--bg-card);
-            border: 1px solid var(--border);
-            border-radius: var(--radius);
-            box-shadow: var(--shadow);
-            overflow: hidden;
-        }
-        .card-header {
-            padding: 18px 22px 16px;
-            border-bottom: 1px solid var(--border);
-            display: flex; align-items: center; justify-content: space-between;
-        }
-        .card-title {
-            font-size: 13px; font-weight: 700;
-            text-transform: uppercase; letter-spacing: 1px;
-            color: var(--text-muted);
-        }
-        .card-body { padding: 20px 22px; }
-
-        /* ─── Form ───────────────────────────────────────────────── */
-        .form-group { margin-bottom: 16px; }
-        .form-label {
-            display: block;
-            font-size: 12px; font-weight: 600;
-            color: var(--text-muted);
-            margin-bottom: 7px;
-            text-transform: uppercase; letter-spacing: 0.5px;
-        }
-        .form-control {
-            width: 100%;
-            background: var(--bg-elevated);
-            border: 1px solid var(--border);
-            border-radius: var(--radius-sm);
-            color: var(--text);
-            font-family: inherit; font-size: 14px;
-            padding: 10px 14px;
-            transition: border-color 0.2s, box-shadow 0.2s;
-            outline: none;
-        }
-        .form-control:focus {
-            border-color: var(--primary);
-            box-shadow: 0 0 0 3px rgba(99,179,237,0.12);
-        }
-        .form-control::placeholder { color: var(--text-dim); }
-
-        /* Gateway selector */
-        .gateway-tabs {
-            display: grid; grid-template-columns: 1fr 1fr;
-            gap: 10px; margin-bottom: 20px;
-        }
-        .gateway-tab {
-            background: var(--bg-elevated);
-            border: 2px solid var(--border);
-            border-radius: var(--radius-sm);
-            padding: 14px;
-            cursor: pointer;
-            text-align: center;
-            transition: all 0.2s;
-            user-select: none;
-        }
-        .gateway-tab:hover { border-color: rgba(255,255,255,0.15); }
-        .gateway-tab.active-selcom {
-            border-color: var(--selcom);
-            background: rgba(0,198,162,0.08);
-            box-shadow: 0 0 20px rgba(0,198,162,0.15);
-        }
-        .gateway-tab.active-azampay {
-            border-color: var(--azampay);
-            background: rgba(124,92,191,0.1);
-            box-shadow: 0 0 20px rgba(124,92,191,0.18);
-        }
-        .gateway-tab-icon { font-size: 22px; margin-bottom: 6px; }
-        .gateway-tab-name { font-size: 13px; font-weight: 700; }
-        .gateway-tab-type { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
-
-        /* Buttons */
-        .btn {
-            display: inline-flex; align-items: center; justify-content: center;
-            gap: 8px;
-            padding: 11px 20px;
-            border-radius: var(--radius-sm);
-            font-family: inherit; font-size: 14px; font-weight: 600;
-            border: none; cursor: pointer;
-            transition: all 0.2s; outline: none;
-        }
-        .btn-primary {
-            background: linear-gradient(135deg, var(--primary), var(--primary-dark));
-            color: #fff;
-            width: 100%;
-        }
-        .btn-primary:hover { filter: brightness(1.1); transform: translateY(-1px); box-shadow: 0 4px 16px rgba(99,179,237,0.3); }
-        .btn-primary:active { transform: translateY(0); }
-        .btn-success {
-            background: var(--success-bg); color: var(--success);
-            border: 1px solid rgba(72,216,144,0.3);
-            padding: 7px 14px; font-size: 12px;
-        }
-        .btn-success:hover { background: rgba(72,216,144,0.2); }
-        .btn-danger {
-            background: var(--danger-bg); color: var(--danger);
-            border: 1px solid rgba(252,108,108,0.3);
-            padding: 7px 14px; font-size: 12px;
-        }
-        .btn-danger:hover { background: rgba(252,108,108,0.2); }
-        .btn-warning {
-            background: var(--warning-bg); color: var(--warning);
-            border: 1px solid rgba(251,191,36,0.3);
-            padding: 7px 14px; font-size: 12px;
-        }
-        .btn-warning:hover { background: rgba(251,191,36,0.2); }
-        .btn-sm { padding: 6px 12px; font-size: 11px; }
-
-        /* ─── Alert / Toast ──────────────────────────────────────── */
-        #toast {
-            position: fixed; bottom: 24px; right: 24px; z-index: 9999;
-            max-width: 360px;
-            padding: 14px 20px;
-            border-radius: var(--radius-sm);
-            font-size: 13px; font-weight: 500;
-            display: none;
-            animation: slideIn 0.3s ease;
-            box-shadow: var(--shadow);
-        }
-        #toast.success { background: rgba(18,32,24,0.98); border: 1px solid rgba(72,216,144,0.35); color: var(--success); }
-        #toast.error   { background: rgba(30,14,14,0.98); border: 1px solid rgba(252,108,108,0.35); color: var(--danger); }
-        #toast.info    { background: rgba(10,22,36,0.98); border: 1px solid rgba(99,179,237,0.35); color: var(--primary); }
-        @keyframes slideIn {
-            from { transform: translateX(120%); opacity: 0; }
-            to   { transform: translateX(0);    opacity: 1; }
-        }
-
-        /* ─── Transaction Queue ──────────────────────────────────── */
-        .tx-list { display: flex; flex-direction: column; gap: 12px; }
-
-        .tx-card {
-            background: var(--bg-elevated);
-            border: 1px solid var(--border);
-            border-radius: var(--radius-sm);
-            padding: 16px;
-            display: flex; flex-direction: column; gap: 12px;
-            transition: border-color 0.2s, box-shadow 0.2s;
-            animation: fadeIn 0.3s ease;
-        }
-        .tx-card:hover { border-color: rgba(255,255,255,0.12); }
-        @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(8px); }
-            to   { opacity: 1; transform: translateY(0); }
-        }
-        .tx-card.gateway-selcom  { border-left: 3px solid var(--selcom); }
-        .tx-card.gateway-azampay { border-left: 3px solid var(--azampay); }
-
-        .tx-header { display: flex; align-items: center; justify-content: space-between; }
-        .tx-gateway-badge {
-            font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px;
-            padding: 3px 10px; border-radius: 99px;
-        }
-        .tx-gateway-badge.selcom  { background: rgba(0,198,162,0.12); color: var(--selcom); }
-        .tx-gateway-badge.azampay { background: rgba(124,92,191,0.15); color: #a78bfa; }
-
-        .tx-status {
-            font-size: 11px; font-weight: 600; padding: 3px 10px; border-radius: 99px;
-        }
-        .tx-status.pending  { background: var(--warning-bg);  color: var(--warning); }
-        .tx-status.approved { background: var(--success-bg);  color: var(--success); }
-        .tx-status.rejected { background: var(--danger-bg);   color: var(--danger);  }
-        .tx-status.timeout  { background: rgba(100,100,100,0.1); color: var(--text-dim); }
-
-        .tx-details { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 16px; }
-        .tx-detail  { display: flex; flex-direction: column; gap: 2px; }
-        .tx-detail-label { font-size: 10px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
-        .tx-detail-value { font-size: 13px; font-weight: 500; font-family: 'JetBrains Mono', monospace; }
-
-        .tx-actions { display: flex; gap: 8px; flex-wrap: wrap; }
-
-        /* ─── Stats Bar ──────────────────────────────────────────── */
-        .stats-bar {
-            display: grid; grid-template-columns: repeat(4, 1fr);
-            gap: 1px;
-            background: var(--border);
-            border: 1px solid var(--border);
-            border-radius: var(--radius-sm);
-            overflow: hidden;
-            margin-bottom: 20px;
-        }
-        .stat-item {
-            background: var(--bg-elevated);
-            padding: 14px 16px;
-            text-align: center;
-        }
-        .stat-value { font-size: 22px; font-weight: 800; font-family: 'JetBrains Mono', monospace; }
-        .stat-label { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-top: 2px; }
-        .stat-pending  .stat-value { color: var(--warning); }
-        .stat-approved .stat-value { color: var(--success); }
-        .stat-rejected .stat-value { color: var(--danger); }
-        .stat-total    .stat-value { color: var(--primary); }
-
-        /* ─── Filter Bar ─────────────────────────────────────────── */
-        .filter-bar {
-            display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; align-items: center;
-        }
-        .filter-btn {
-            padding: 6px 14px; border-radius: 99px;
-            font-size: 12px; font-weight: 600; cursor: pointer;
-            border: 1px solid var(--border);
-            background: transparent; color: var(--text-muted);
-            transition: all 0.2s;
-        }
-        .filter-btn:hover, .filter-btn.active {
-            background: var(--bg-elevated);
-            color: var(--text);
-            border-color: rgba(255,255,255,0.2);
-        }
-        .filter-btn.active { color: var(--primary); border-color: var(--primary); }
-        .filter-spacer { flex: 1; }
-        .auto-refresh-label { font-size: 11px; color: var(--text-muted); display: flex; align-items: center; gap: 6px; }
-        .toggle-switch {
-            width: 36px; height: 20px;
-            background: var(--bg-elevated);
-            border: 1px solid var(--border);
-            border-radius: 99px;
-            cursor: pointer;
-            position: relative;
-            transition: background 0.2s;
-        }
-        .toggle-switch.on { background: var(--primary); border-color: var(--primary); }
-        .toggle-thumb {
-            position: absolute; top: 2px; left: 2px;
-            width: 14px; height: 14px;
-            background: #fff; border-radius: 50%;
-            transition: left 0.2s;
-        }
-        .toggle-switch.on .toggle-thumb { left: 18px; }
-
-        /* ─── Empty State ────────────────────────────────────────── */
-        .empty-state {
-            padding: 60px 20px; text-align: center;
-        }
-        .empty-icon { font-size: 48px; margin-bottom: 16px; opacity: 0.4; }
-        .empty-title { font-size: 16px; font-weight: 600; color: var(--text-muted); }
-        .empty-sub   { font-size: 13px; color: var(--text-dim); margin-top: 6px; }
-
-        /* ─── Right Panel Sticky ─────────────────────────────────── */
-        .right-panel { position: sticky; top: 80px; }
-
-        /* ─── API Info Box ───────────────────────────────────────── */
-        .api-info {
-            margin-top: 20px;
-        }
-        .api-block {
-            background: var(--bg);
-            border: 1px solid var(--border);
-            border-radius: var(--radius-sm);
-            padding: 14px 16px;
-            margin-bottom: 10px;
-        }
-        .api-block-title { font-size: 11px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
-        .api-url {
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 11px; color: var(--primary);
-            word-break: break-all;
-        }
-        .api-method {
-            display: inline-block;
-            font-size: 9px; font-weight: 700; letter-spacing: 1px;
-            padding: 1px 7px; border-radius: 4px;
-            background: rgba(99,179,237,0.12); color: var(--primary);
-            margin-right: 6px;
-        }
-
-        /* ─── Scrollable tx list ─────────────────────────────────── */
-        .tx-scroll {
-            max-height: calc(100vh - 260px);
-            overflow-y: auto;
-            padding-right: 4px;
-        }
-        .tx-scroll::-webkit-scrollbar { width: 4px; }
-        .tx-scroll::-webkit-scrollbar-track { background: transparent; }
-        .tx-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
-
-        /* ─── Loading shimmer ────────────────────────────────────── */
-        .shimmer {
-            background: linear-gradient(90deg, var(--bg-elevated) 25%, rgba(255,255,255,0.04) 50%, var(--bg-elevated) 75%);
-            background-size: 200% 100%;
-            animation: shimmer 1.5s infinite;
-            border-radius: var(--radius-sm);
-            height: 80px;
-        }
-        @keyframes shimmer { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
-
-        /* ─── Selcom Pay Page ────────────────────────────────────── */
-        .pay-page-overlay {
-            position: fixed; inset: 0; z-index: 9999;
-            background: rgba(0,0,0,0.7);
-            backdrop-filter: blur(8px);
-            display: none;
-            align-items: center; justify-content: center;
-        }
-        .pay-page-overlay.open { display: flex; }
-        .pay-page-modal {
-            background: var(--bg-card);
-            border: 1px solid var(--border);
-            border-radius: 20px;
-            padding: 36px;
-            max-width: 420px; width: 100%;
-            text-align: center;
-            box-shadow: var(--shadow);
-        }
-        .pay-page-icon { font-size: 48px; margin-bottom: 12px; }
-        .pay-page-title { font-size: 22px; font-weight: 800; margin-bottom: 6px; }
-        .pay-page-amount { font-size: 36px; font-weight: 800; color: var(--selcom); font-family: 'JetBrains Mono', monospace; margin: 16px 0; }
-        .pay-page-phone { font-size: 15px; color: var(--text-muted); margin-bottom: 24px; }
-        .pay-page-actions { display: flex; gap: 12px; }
-        .pay-page-actions .btn { flex: 1; }
-    </style>
-</head>
-<body>
-
-<!-- ─── Header ───────────────────────────────────────────────────── -->
-<header class="header">
-    <div class="header-brand">
-        <div class="header-icon">🧪</div>
-        <div>
-            <div class="header-title">Payment Emulator</div>
-            <div class="header-sub">Sandbox Gateway Simulator</div>
+            <!-- Status Indicator Badge -->
+            <div class="mt-4 md:mt-0 flex items-center space-x-3">
+                <div class="inline-flex items-center space-x-2 px-3.5 py-1.5 rounded-full text-xs font-semibold bg-emerald-500/10 border border-emerald-500/20 text-emerald-400">
+                    <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                    <span>Sandbox Gateway Active</span>
+                </div>
+            </div>
         </div>
+
+        <!-- Toast Feedback Banner -->
+        <div id="toast" class="hidden fixed bottom-6 right-6 z-50 max-w-sm p-4 rounded-xl shadow-2xl text-xs font-medium border animate-slide-up transition-all"></div>
+
+        <!-- Main Sandbox 2-Column Grid -->
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+            
+            <!-- LEFT COLUMN: Payment Dispatcher & Payload Inspector (5 cols) -->
+            <div class="lg:col-span-5 space-y-6">
+                
+                <!-- Payment Initiator Card -->
+                <div class="bg-slate-800/80 rounded-2xl border border-slate-700/60 p-6 shadow-xl backdrop-blur-sm">
+                    <h2 class="text-base font-bold text-white mb-6 pb-3 border-b border-slate-700/60 flex items-center space-x-2">
+                        <svg class="w-4 h-4 text-sky-400" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" />
+                        </svg>
+                        <span>Dispatch Test Payment</span>
+                    </h2>
+
+                    <!-- Gateway Driver Selector -->
+                    <div class="mb-5">
+                        <label class="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">Select Target Gateway Driver</label>
+                        <div class="grid grid-cols-2 gap-3">
+                            <button type="button" 
+                                    id="tab-selcom" 
+                                    onclick="selectGateway('selcom')" 
+                                    class="p-3.5 rounded-xl border-2 text-center transition-all bg-emerald-950/20 border-emerald-500/60 text-emerald-300">
+                                <div class="font-bold text-sm">SELCOM</div>
+                                <div class="text-[11px] text-slate-400 mt-0.5">Order Checkout URL</div>
+                            </button>
+
+                            <button type="button" 
+                                    id="tab-azampay" 
+                                    onclick="selectGateway('azampay')" 
+                                    class="p-3.5 rounded-xl border-2 text-center transition-all bg-slate-800/40 border-slate-700 text-slate-400 hover:border-slate-600">
+                                <div class="font-bold text-sm">AZAMPAY</div>
+                                <div class="text-[11px] text-slate-400 mt-0.5">USSD Push Simulation</div>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Payment Initiation Form -->
+                    <form id="initiateForm" onsubmit="initiatePayment(event)" class="space-y-4">
+                        <input type="hidden" id="gateway" value="selcom" />
+
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                            <div>
+                                <label for="amount" class="block text-xs font-semibold text-slate-300 mb-1">Amount (TZS)</label>
+                                <input type="number" id="amount" placeholder="5000" min="1" value="5000" required 
+                                       class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-sm font-mono text-white focus:ring-2 focus:ring-sky-400 focus:border-sky-400 outline-none">
+                            </div>
+                            <div>
+                                <label for="phone" class="block text-xs font-semibold text-slate-300 mb-1">Phone Number</label>
+                                <input type="text" id="phone" placeholder="0712345678" value="0712345678" required 
+                                       class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-sm font-mono text-white focus:ring-2 focus:ring-sky-400 focus:border-sky-400 outline-none">
+                            </div>
+                        </div>
+
+                        <div>
+                            <div class="flex items-center justify-between mb-1">
+                                <label for="external_reference" class="block text-xs font-semibold text-slate-300">External Reference ID</label>
+                                <button type="button" onclick="generateRef()" class="text-[11px] font-mono text-sky-400 hover:underline">Auto-Generate</button>
+                            </div>
+                            <input type="text" id="external_reference" placeholder="ORDER-2026-001" required 
+                                   class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-sm font-mono text-white focus:ring-2 focus:ring-sky-400 focus:border-sky-400 outline-none">
+                        </div>
+
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                            <div>
+                                <label for="name" class="block text-xs font-semibold text-slate-400 mb-1">Customer Name <span class="text-slate-500">(opt)</span></label>
+                                <input type="text" id="name" placeholder="John Doe" 
+                                       class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-sm text-white focus:ring-2 focus:ring-sky-400 outline-none">
+                            </div>
+                            <div>
+                                <label for="email" class="block text-xs font-semibold text-slate-400 mb-1">Customer Email <span class="text-slate-500">(opt)</span></label>
+                                <input type="email" id="email" placeholder="john@example.com" 
+                                       class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-sm text-white focus:ring-2 focus:ring-sky-400 outline-none">
+                            </div>
+                        </div>
+
+                        <div>
+                            <label for="remarks" class="block text-xs font-semibold text-slate-400 mb-1">Remarks <span class="text-slate-500">(opt)</span></label>
+                            <input type="text" id="remarks" placeholder="Invoice #1092" 
+                                   class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-sm text-white focus:ring-2 focus:ring-sky-400 outline-none">
+                        </div>
+
+                        <button type="submit" id="submitBtn" class="w-full mt-2 py-3 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-bold text-sm transition-all shadow-lg flex items-center justify-center space-x-2">
+                            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" />
+                            </svg>
+                            <span id="submitText">Issue Payment Request</span>
+                        </button>
+                    </form>
+                </div>
+
+                <!-- API Sandbox Endpoints Card -->
+                <div class="bg-slate-800/80 rounded-2xl border border-slate-700/60 p-6 shadow-xl">
+                    <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400 mb-4 flex items-center space-x-2">
+                        <svg class="w-4 h-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M13.19 8.688a4.5 4.5 0 011.242 7.244l-4.5 4.5a4.5 4.5 0 01-6.364-6.364l1.757-1.757m13.35-.622l1.757-1.757a4.5 4.5 0 00-6.364-6.364l-4.5 4.5a4.5 4.5 0 001.242 7.244" />
+                        </svg>
+                        <span>Local Sandbox API Endpoints</span>
+                    </h3>
+
+                    <div class="space-y-3 font-mono text-xs">
+                        <div class="p-3 rounded-xl bg-slate-900 border border-slate-800">
+                            <div class="text-[10px] uppercase font-bold text-emerald-400 mb-1">Processor Initiation Endpoint</div>
+                            <div class="text-slate-300 break-all"><span class="px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-300 font-bold mr-1">POST</span>{{ url('/api/v1/payments/initiate') }}</div>
+                        </div>
+
+                        <div class="p-3 rounded-xl bg-slate-900 border border-slate-800">
+                            <div class="text-[10px] uppercase font-bold text-slate-400 mb-1">Selcom Sandbox Base URL</div>
+                            <div class="text-slate-300 break-all"><span class="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-bold mr-1">POST</span>{{ url('/api/emulator/selcom') }}</div>
+                        </div>
+
+                        <div class="p-3 rounded-xl bg-slate-900 border border-slate-800">
+                            <div class="text-[10px] uppercase font-bold text-slate-400 mb-1">AzamPay Sandbox Base URL</div>
+                            <div class="text-slate-300 break-all"><span class="px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 font-bold mr-1">POST</span>{{ url('/api/emulator/azampay') }}</div>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- RIGHT COLUMN: Real-Time Transaction Queue & Action Console (7 cols) -->
+            <div class="lg:col-span-7">
+                <div class="bg-slate-800/80 rounded-2xl border border-slate-700/60 p-6 shadow-xl backdrop-blur-sm">
+                    
+                    <div class="flex items-center justify-between pb-4 mb-6 border-b border-slate-700/60">
+                        <h2 class="text-base font-bold text-white flex items-center space-x-2">
+                            <svg class="w-5 h-5 text-sky-400" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 12h16.5m-16.5 3.75h16.5M3.75 19.5h16.5M3.75 4.5h16.5m-16.5 3.75h16.5" />
+                            </svg>
+                            <span>Live Telemetry & Queue Feed</span>
+                        </h2>
+
+                        <div class="flex items-center space-x-3">
+                            <label class="flex items-center space-x-2 text-xs text-slate-400 cursor-pointer">
+                                <span>Auto Sync</span>
+                                <input type="checkbox" id="autoRefresh" checked onchange="toggleAutoRefresh()" class="rounded bg-slate-900 border-slate-700 text-sky-500 focus:ring-sky-400">
+                            </label>
+
+                            <button type="button" onclick="loadTransactions()" id="refreshBtn" class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-xs font-semibold text-white transition-colors flex items-center space-x-1">
+                                <svg class="w-3.5 h-3.5 text-slate-300" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
+                                </svg>
+                                <span>Refresh</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Telemetry Stats Grid -->
+                    <div class="grid grid-cols-4 gap-3 mb-6">
+                        <div class="p-3 bg-slate-900/80 rounded-xl border border-slate-700/50 text-center">
+                            <div id="stat-pending" class="text-xl font-bold font-mono text-amber-400">—</div>
+                            <div class="text-[10px] font-bold uppercase tracking-wider text-slate-400 mt-1">Pending</div>
+                        </div>
+
+                        <div class="p-3 bg-slate-900/80 rounded-xl border border-slate-700/50 text-center">
+                            <div id="stat-approved" class="text-xl font-bold font-mono text-emerald-400">—</div>
+                            <div class="text-[10px] font-bold uppercase tracking-wider text-slate-400 mt-1">Approved</div>
+                        </div>
+
+                        <div class="p-3 bg-slate-900/80 rounded-xl border border-slate-700/50 text-center">
+                            <div id="stat-rejected" class="text-xl font-bold font-mono text-rose-400">—</div>
+                            <div class="text-[10px] font-bold uppercase tracking-wider text-slate-400 mt-1">Rejected</div>
+                        </div>
+
+                        <div class="p-3 bg-slate-900/80 rounded-xl border border-slate-700/50 text-center">
+                            <div id="stat-total" class="text-xl font-bold font-mono text-sky-400">—</div>
+                            <div class="text-[10px] font-bold uppercase tracking-wider text-slate-400 mt-1">Total</div>
+                        </div>
+                    </div>
+
+                    <!-- Filter Pill Bar -->
+                    <div class="flex flex-wrap items-center gap-2 mb-6 text-xs">
+                        <button type="button" class="filter-btn active px-3 py-1.5 rounded-lg border border-sky-500/40 bg-sky-500/10 text-sky-300 font-semibold" data-filter="all" onclick="setFilter('all', this)">All</button>
+                        <button type="button" class="filter-btn px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-900 text-slate-400 hover:text-white" data-filter="pending" onclick="setFilter('pending', this)">Pending</button>
+                        <button type="button" class="filter-btn px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-900 text-slate-400 hover:text-white" data-filter="approved" onclick="setFilter('approved', this)">Approved</button>
+                        <button type="button" class="filter-btn px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-900 text-slate-400 hover:text-white" data-filter="rejected" onclick="setFilter('rejected', this)">Rejected</button>
+                        <button type="button" class="filter-btn px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-900 text-slate-400 hover:text-white" data-filter="selcom" onclick="setFilter('selcom', this)">Selcom Driver</button>
+                        <button type="button" class="filter-btn px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-900 text-slate-400 hover:text-white" data-filter="azampay" onclick="setFilter('azampay', this)">AzamPay Driver</button>
+                    </div>
+
+                    <!-- Scrollable Feed Container -->
+                    <div class="max-h-[580px] overflow-y-auto pr-1 space-y-3" id="txList">
+                        <div class="p-8 text-center text-slate-500 font-mono text-xs">
+                            Loading transaction queue feed...
+                        </div>
+                    </div>
+
+                </div>
+            </div>
+
+        </div>
+
     </div>
-    <div class="header-badge">
-        <div class="pulse-dot"></div>
-        SANDBOX ACTIVE
-    </div>
-</header>
+</div>
 
-<!-- ─── Main Layout ───────────────────────────────────────────────── -->
-<main class="layout">
+@endsection
 
-    <!-- ─── LEFT: Initiate Test Payment ───────────────────────────── -->
-    <aside>
-        <div class="card">
-            <div class="card-header">
-                <span class="card-title">⚡ Initiate Test Payment</span>
-            </div>
-            <div class="card-body">
-                <!-- Gateway selector -->
-                <div class="form-group">
-                    <label class="form-label">Select Gateway</label>
-                    <div class="gateway-tabs">
-                        <div class="gateway-tab active-selcom" id="tab-selcom" onclick="selectGateway('selcom')">
-                            <div class="gateway-tab-icon">🏦</div>
-                            <div class="gateway-tab-name" style="color: var(--selcom)">Selcom</div>
-                            <div class="gateway-tab-type">Checkout URL</div>
-                        </div>
-                        <div class="gateway-tab" id="tab-azampay" onclick="selectGateway('azampay')">
-                            <div class="gateway-tab-icon">📲</div>
-                            <div class="gateway-tab-name" style="color: #a78bfa">AzamPay</div>
-                            <div class="gateway-tab-type">USSD Push</div>
-                        </div>
-                    </div>
-                </div>
-
-                <form id="initiateForm" onsubmit="initiatePayment(event)">
-                    <input type="hidden" id="gateway" value="selcom" />
-
-                    <div class="form-group">
-                        <label class="form-label" for="amount">Amount (TZS)</label>
-                        <input class="form-control" type="number" id="amount" placeholder="e.g. 5000" min="1" required />
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label" for="phone">Phone Number</label>
-                        <input class="form-control" type="text" id="phone" placeholder="e.g. 0712345678" required />
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label" for="external_reference">External Reference</label>
-                        <input class="form-control" type="text" id="external_reference" placeholder="e.g. ORDER-2026-001" required />
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label" for="name">Customer Name <span style="color:var(--text-dim)">(optional)</span></label>
-                        <input class="form-control" type="text" id="name" placeholder="e.g. John Doe" />
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label" for="email">Email <span style="color:var(--text-dim)">(optional)</span></label>
-                        <input class="form-control" type="email" id="email" placeholder="e.g. john@example.com" />
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label" for="remarks">Remarks <span style="color:var(--text-dim)">(optional)</span></label>
-                        <input class="form-control" type="text" id="remarks" placeholder="e.g. Invoice #1234" />
-                    </div>
-
-                    <button type="submit" class="btn btn-primary" id="submitBtn">
-                        <span id="submitIcon">⚡</span>
-                        <span id="submitText">Send Payment Request</span>
-                    </button>
-                </form>
-            </div>
-        </div>
-
-        <!-- API Info -->
-        <div class="api-info">
-            <div class="card">
-                <div class="card-header">
-                    <span class="card-title">🔌 Emulator Endpoints</span>
-                </div>
-                <div class="card-body" style="padding-top:14px;">
-                    <p style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">
-                        Point your processor config to these URLs instead of real gateways:
-                    </p>
-                    <div class="api-block">
-                        <div class="api-block-title">🟢 AzamPay Auth Base URL</div>
-                        <div class="api-url"><span class="api-method">POST</span>{{ url('/api/emulator/azampay') }}</div>
-                    </div>
-                    <div class="api-block">
-                        <div class="api-block-title">🟢 AzamPay Base URL</div>
-                        <div class="api-url"><span class="api-method">POST</span>{{ url('/api/emulator/azampay') }}</div>
-                    </div>
-                    <div class="api-block">
-                        <div class="api-block-title">🏦 Selcom Base URL</div>
-                        <div class="api-url"><span class="api-method">POST</span>{{ url('/api/emulator/selcom') }}</div>
-                    </div>
-                    <div class="api-block">
-                        <div class="api-block-title">📤 Processor Initiate</div>
-                        <div class="api-url"><span class="api-method">POST</span>{{ url('/api/v1/payments/initiate') }}</div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </aside>
-
-    <!-- ─── RIGHT: Transaction Queue ──────────────────────────────── -->
-    <section>
-        <div class="card right-panel">
-            <div class="card-header">
-                <span class="card-title">📋 Transaction Queue</span>
-                <button class="btn btn-success btn-sm" onclick="loadTransactions()" id="refreshBtn">↻ Refresh</button>
-            </div>
-            <div class="card-body">
-
-                <!-- Stats -->
-                <div class="stats-bar" id="statsBar">
-                    <div class="stat-item stat-pending">
-                        <div class="stat-value" id="stat-pending">—</div>
-                        <div class="stat-label">Pending</div>
-                    </div>
-                    <div class="stat-item stat-approved">
-                        <div class="stat-value" id="stat-approved">—</div>
-                        <div class="stat-label">Approved</div>
-                    </div>
-                    <div class="stat-item stat-rejected">
-                        <div class="stat-value" id="stat-rejected">—</div>
-                        <div class="stat-label">Rejected</div>
-                    </div>
-                    <div class="stat-item stat-total">
-                        <div class="stat-value" id="stat-total">—</div>
-                        <div class="stat-label">Total</div>
-                    </div>
-                </div>
-
-                <!-- Filter + Auto-refresh -->
-                <div class="filter-bar">
-                    <button class="filter-btn active" data-filter="all"      onclick="setFilter('all', this)">All</button>
-                    <button class="filter-btn"        data-filter="pending"  onclick="setFilter('pending', this)">⏳ Pending</button>
-                    <button class="filter-btn"        data-filter="approved" onclick="setFilter('approved', this)">✅ Approved</button>
-                    <button class="filter-btn"        data-filter="rejected" onclick="setFilter('rejected', this)">❌ Rejected</button>
-                    <button class="filter-btn"        data-filter="selcom"   onclick="setFilter('selcom', this)">Selcom</button>
-                    <button class="filter-btn"        data-filter="azampay"  onclick="setFilter('azampay', this)">AzamPay</button>
-                    <div class="filter-spacer"></div>
-                    <label class="auto-refresh-label">
-                        Auto
-                        <div class="toggle-switch on" id="autoRefreshToggle" onclick="toggleAutoRefresh()">
-                            <div class="toggle-thumb"></div>
-                        </div>
-                    </label>
-                </div>
-
-                <!-- Transaction List -->
-                <div class="tx-scroll">
-                    <div class="tx-list" id="txList">
-                        <div class="shimmer"></div>
-                        <div class="shimmer" style="height:60px;margin-top:4px;opacity:0.5"></div>
-                    </div>
-                </div>
-
-            </div>
-        </div>
-    </section>
-
-</main>
-
-<!-- ─── Toast ─────────────────────────────────────────────────────── -->
-<div id="toast"></div>
-
+@push('scripts')
 <script>
-/* ─── State ───────────────────────────────────────────────────────── */
-let allTransactions = [];
-let currentFilter   = 'all';
-let autoRefresh     = true;
-let refreshTimer    = null;
-const REFRESH_MS    = 3000;
+    let allTransactions = [];
+    let currentFilter = 'all';
+    let autoRefresh = true;
+    let refreshInterval = null;
 
-/* ─── Gateway Selection ───────────────────────────────────────────── */
-function selectGateway(gw) {
-    document.getElementById('gateway').value = gw;
-    document.getElementById('tab-selcom').className  = gw === 'selcom'  ? 'gateway-tab active-selcom'  : 'gateway-tab';
-    document.getElementById('tab-azampay').className = gw === 'azampay' ? 'gateway-tab active-azampay' : 'gateway-tab';
-}
-
-/* ─── Initiate Payment ────────────────────────────────────────────── */
-async function initiatePayment(e) {
-    e.preventDefault();
-
-    const btn      = document.getElementById('submitBtn');
-    const iconEl   = document.getElementById('submitIcon');
-    const textEl   = document.getElementById('submitText');
-    btn.disabled   = true;
-    iconEl.textContent = '⏳';
-    textEl.textContent = 'Sending…';
-
-    const payload = {
-        gateway:            document.getElementById('gateway').value,
-        amount:             document.getElementById('amount').value,
-        phone:              document.getElementById('phone').value,
-        external_reference: document.getElementById('external_reference').value,
-        name:               document.getElementById('name').value  || undefined,
-        email:              document.getElementById('email').value || undefined,
-        remarks:            document.getElementById('remarks').value || undefined,
-    };
-
-    // Remove undefined keys
-    Object.keys(payload).forEach(k => payload[k] === undefined && delete payload[k]);
-
-    try {
-        const res = await fetch('/api/v1/payments/initiate', {
-            method:  'POST',
-            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-            body:    JSON.stringify(payload),
-        });
-        const data = await res.json();
-
-        if (data.success) {
-            showToast('success', '✅ Payment initiated! Check the queue →');
-            // Auto-open Selcom checkout URL in new tab
-            if (payload.gateway === 'selcom' && data.payment_url) {
-                window.open(data.payment_url, '_blank');
-                showToast('info', '🏦 Selcom checkout page opened in a new tab.');
-            }
-            loadTransactions();
-            // Reset ref field
-            document.getElementById('external_reference').value = 'ORDER-' + Date.now();
-        } else {
-            showToast('error', '❌ ' + (data.message || 'Initiation failed'));
-        }
-    } catch (err) {
-        showToast('error', '❌ Network error: ' + err.message);
-    } finally {
-        btn.disabled = false;
-        iconEl.textContent = '⚡';
-        textEl.textContent = 'Send Payment Request';
-    }
-}
-
-/* ─── Load Transactions ───────────────────────────────────────────── */
-async function loadTransactions() {
-    try {
-        const res  = await fetch('/api/emulator/transactions', { headers: { 'Accept': 'application/json' } });
-        allTransactions = await res.json();
-        renderTransactions();
-        updateStats();
-    } catch (err) {
-        console.error('Failed to load transactions:', err);
-    }
-}
-
-/* ─── Render Transactions ─────────────────────────────────────────── */
-function renderTransactions() {
-    const list = document.getElementById('txList');
-    let txs    = allTransactions;
-
-    if (currentFilter === 'pending' || currentFilter === 'approved' || currentFilter === 'rejected' || currentFilter === 'timeout') {
-        txs = txs.filter(t => t.status === currentFilter);
-    } else if (currentFilter === 'selcom' || currentFilter === 'azampay') {
-        txs = txs.filter(t => t.gateway === currentFilter);
+    function generateRef() {
+        document.getElementById('external_reference').value = 'ORDER-' + Date.now().toString().slice(-6);
     }
 
-    if (txs.length === 0) {
-        list.innerHTML = `
-            <div class="empty-state">
-                <div class="empty-icon">🔇</div>
-                <div class="empty-title">No transactions yet</div>
-                <div class="empty-sub">Initiate a payment to see it appear here.</div>
-            </div>`;
-        return;
-    }
-
-    list.innerHTML = txs.map(tx => {
-        const isPending = tx.status === 'pending';
-        const timeAgo   = formatTimeAgo(tx.created_at);
-        const amount    = Number(tx.amount).toLocaleString('en-TZ');
-
-        return `
-        <div class="tx-card gateway-${tx.gateway}" id="tx-${tx.id}">
-            <div class="tx-header">
-                <span class="tx-gateway-badge ${tx.gateway}">${tx.gateway.toUpperCase()}</span>
-                <span class="tx-status ${tx.status}">${statusLabel(tx.status)}</span>
-            </div>
-            <div class="tx-details">
-                <div class="tx-detail">
-                    <span class="tx-detail-label">Amount</span>
-                    <span class="tx-detail-value">TZS ${amount}</span>
-                </div>
-                <div class="tx-detail">
-                    <span class="tx-detail-label">Phone</span>
-                    <span class="tx-detail-value">${tx.phone}</span>
-                </div>
-                <div class="tx-detail">
-                    <span class="tx-detail-label">Reference</span>
-                    <span class="tx-detail-value" style="font-size:11px">${tx.external_id}</span>
-                </div>
-                <div class="tx-detail">
-                    <span class="tx-detail-label">Created</span>
-                    <span class="tx-detail-value" style="font-size:11px;color:var(--text-muted)">${timeAgo}</span>
-                </div>
-                ${tx.buyer_name ? `
-                <div class="tx-detail">
-                    <span class="tx-detail-label">Customer</span>
-                    <span class="tx-detail-value" style="font-size:12px">${tx.buyer_name}</span>
-                </div>` : ''}
-            </div>
-            ${isPending ? `
-            <div class="tx-actions">
-                <button class="btn btn-success" onclick="resolve(${tx.id}, 'approve')" id="btn-approve-${tx.id}">
-                    ✅ Approve
-                </button>
-                <button class="btn btn-danger"  onclick="resolve(${tx.id}, 'reject')"  id="btn-reject-${tx.id}">
-                    ❌ Reject
-                </button>
-                <button class="btn btn-warning" onclick="resolve(${tx.id}, 'timeout')" id="btn-timeout-${tx.id}">
-                    ⏱ Timeout
-                </button>
-            </div>` : ''}
-        </div>`;
-    }).join('');
-}
-
-/* ─── Resolve ─────────────────────────────────────────────────────── */
-async function resolve(id, action) {
-    // Disable all action buttons for this tx
-    ['approve','reject','timeout'].forEach(a => {
-        const el = document.getElementById(`btn-${a}-${id}`);
-        if (el) { el.disabled = true; el.style.opacity = '0.5'; }
+    document.addEventListener('DOMContentLoaded', () => {
+        generateRef();
+        loadTransactions();
+        startAutoRefresh();
     });
 
-    try {
-        const res  = await fetch(`/api/emulator/resolve/${id}`, {
-            method:  'POST',
-            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json',
-                       'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]')?.content || '' },
-            body:    JSON.stringify({ action }),
-        });
-        const data = await res.json();
+    function selectGateway(gw) {
+        document.getElementById('gateway').value = gw;
 
-        if (data.success) {
-            const labels = { approve: '✅ Approved', reject: '❌ Rejected', timeout: '⏱ Timed out' };
-            showToast('success', `${labels[action]} — callback fired to processor!`);
-            await loadTransactions();
+        const selcomBtn = document.getElementById('tab-selcom');
+        const azamBtn = document.getElementById('tab-azampay');
+
+        if (gw === 'selcom') {
+            selcomBtn.className = 'p-3.5 rounded-xl border-2 text-center transition-all bg-emerald-950/20 border-emerald-500/60 text-emerald-300';
+            azamBtn.className = 'p-3.5 rounded-xl border-2 text-center transition-all bg-slate-800/40 border-slate-700 text-slate-400 hover:border-slate-600';
         } else {
-            showToast('error', data.error || 'Failed to resolve transaction.');
+            azamBtn.className = 'p-3.5 rounded-xl border-2 text-center transition-all bg-indigo-950/20 border-indigo-500/60 text-indigo-300';
+            selcomBtn.className = 'p-3.5 rounded-xl border-2 text-center transition-all bg-slate-800/40 border-slate-700 text-slate-400 hover:border-slate-600';
         }
-    } catch (err) {
-        showToast('error', '❌ ' + err.message);
     }
-}
 
-/* ─── Stats ───────────────────────────────────────────────────────── */
-function updateStats() {
-    const counts = { pending: 0, approved: 0, rejected: 0 };
-    allTransactions.forEach(t => { if (counts[t.status] !== undefined) counts[t.status]++; });
-    document.getElementById('stat-pending').textContent  = counts.pending;
-    document.getElementById('stat-approved').textContent = counts.approved;
-    document.getElementById('stat-rejected').textContent = counts.rejected;
-    document.getElementById('stat-total').textContent    = allTransactions.length;
-}
+    async function initiatePayment(e) {
+        e.preventDefault();
+        const btn = document.getElementById('submitBtn');
+        const text = document.getElementById('submitText');
+        btn.disabled = true;
+        text.textContent = 'Processing Dispatch…';
 
-/* ─── Filter ──────────────────────────────────────────────────────── */
-function setFilter(filter, el) {
-    currentFilter = filter;
-    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
-    el.classList.add('active');
-    renderTransactions();
-}
+        const payload = {
+            gateway: document.getElementById('gateway').value,
+            amount: document.getElementById('amount').value,
+            phone: document.getElementById('phone').value,
+            external_reference: document.getElementById('external_reference').value,
+            name: document.getElementById('name').value || undefined,
+            email: document.getElementById('email').value || undefined,
+            remarks: document.getElementById('remarks').value || undefined,
+        };
 
-/* ─── Auto-Refresh ────────────────────────────────────────────────── */
-function toggleAutoRefresh() {
-    autoRefresh = !autoRefresh;
-    const toggle = document.getElementById('autoRefreshToggle');
-    toggle.classList.toggle('on', autoRefresh);
-    if (autoRefresh) startAutoRefresh();
-    else clearTimeout(refreshTimer);
-}
-function startAutoRefresh() {
-    clearTimeout(refreshTimer);
-    if (autoRefresh) {
-        refreshTimer = setTimeout(async () => {
-            await loadTransactions();
-            startAutoRefresh();
-        }, REFRESH_MS);
+        try {
+            const res = await fetch('/api/v1/payments/initiate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            const data = await res.json();
+
+            if (data.success) {
+                showToast('success', 'Payment initiated! Request added to telemetry feed.');
+                if (payload.gateway === 'selcom' && data.payment_url) {
+                    window.open(data.payment_url, '_blank');
+                    showToast('info', 'Opened Selcom Checkout URL in new tab.');
+                }
+                generateRef();
+                loadTransactions();
+            } else {
+                showToast('error', data.message || 'Payment initiation failed.');
+            }
+        } catch (err) {
+            showToast('error', 'Network failure: ' + err.message);
+        } finally {
+            btn.disabled = false;
+            text.textContent = 'Issue Payment Request';
+        }
     }
-}
 
-/* ─── Helpers ─────────────────────────────────────────────────────── */
-function statusLabel(s) {
-    return { pending: '⏳ Pending', approved: '✅ Approved', rejected: '❌ Rejected', timeout: '⏱ Timeout' }[s] || s;
-}
+    async function loadTransactions() {
+        try {
+            const res = await fetch('/api/emulator/transactions', { headers: { 'Accept': 'application/json' } });
+            allTransactions = await res.json();
+            renderTransactions();
+            updateStats();
+        } catch (err) {
+            console.error('Failed loading transactions:', err);
+        }
+    }
 
-function formatTimeAgo(dateStr) {
-    const diff = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000);
-    if (diff < 60)   return `${diff}s ago`;
-    if (diff < 3600) return `${Math.floor(diff/60)}m ago`;
-    return `${Math.floor(diff/3600)}h ago`;
-}
+    function setFilter(filterKey, element) {
+        currentFilter = filterKey;
+        document.querySelectorAll('.filter-btn').forEach(btn => {
+            btn.className = 'filter-btn px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-900 text-slate-400 hover:text-white';
+        });
+        element.className = 'filter-btn active px-3 py-1.5 rounded-lg border border-sky-500/40 bg-sky-500/10 text-sky-300 font-semibold';
+        renderTransactions();
+    }
 
-function showToast(type, msg) {
-    const t = document.getElementById('toast');
-    t.className = type;
-    t.textContent = msg;
-    t.style.display = 'block';
-    clearTimeout(t._timer);
-    t._timer = setTimeout(() => { t.style.display = 'none'; }, 4000);
-}
+    function renderTransactions() {
+        const container = document.getElementById('txList');
+        let filtered = allTransactions;
 
-/* ─── Init ────────────────────────────────────────────────────────── */
-// Pre-fill a reference
-document.getElementById('external_reference').value = 'ORDER-' + Date.now();
+        if (['pending', 'approved', 'rejected', 'timeout'].includes(currentFilter)) {
+            filtered = filtered.filter(t => t.status === currentFilter);
+        } else if (['selcom', 'azampay'].includes(currentFilter)) {
+            filtered = filtered.filter(t => t.gateway === currentFilter);
+        }
 
-loadTransactions();
-startAutoRefresh();
+        if (filtered.length === 0) {
+            container.innerHTML = `
+                <div class="p-12 text-center text-slate-500">
+                    <svg class="w-10 h-10 text-slate-700 mx-auto mb-3" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
+                    </svg>
+                    <div class="font-bold text-slate-400 text-sm">No Matching Transactions</div>
+                    <div class="text-xs text-slate-600 mt-1">Dispatch a new payment request to populate the telemetry feed.</div>
+                </div>`;
+            return;
+        }
+
+        container.innerHTML = filtered.map(tx => {
+            const isSelcom = tx.gateway === 'selcom';
+            const isPending = tx.status === 'pending';
+            const formattedAmount = Number(tx.amount).toLocaleString();
+
+            return `
+            <div class="p-4 rounded-xl bg-slate-900/90 border ${isSelcom ? 'border-emerald-500/30' : 'border-indigo-500/30'} space-y-3">
+                <div class="flex items-center justify-between">
+                    <span class="px-2.5 py-0.5 rounded-full text-[10px] font-bold font-mono tracking-wider ${isSelcom ? 'bg-emerald-500/20 text-emerald-300' : 'bg-indigo-500/20 text-indigo-300'}">
+                        ${tx.gateway.toUpperCase()}
+                    </span>
+                    <span class="px-2.5 py-0.5 rounded-full text-xs font-semibold ${statusBadgeClass(tx.status)}">
+                        ${tx.status.toUpperCase()}
+                    </span>
+                </div>
+
+                <div class="grid grid-cols-2 gap-3 text-xs font-mono">
+                    <div>
+                        <span class="text-slate-500 block text-[10px] uppercase">Amount</span>
+                        <span class="text-white font-bold text-sm">TZS ${formattedAmount}</span>
+                    </div>
+                    <div>
+                        <span class="text-slate-500 block text-[10px] uppercase">Phone</span>
+                        <span class="text-slate-300">${tx.phone}</span>
+                    </div>
+                    <div>
+                        <span class="text-slate-500 block text-[10px] uppercase">Ref ID</span>
+                        <span class="text-slate-300 truncate block">${tx.external_id}</span>
+                    </div>
+                    <div>
+                        <span class="text-slate-500 block text-[10px] uppercase">Created</span>
+                        <span class="text-slate-400 text-[11px]">${formatTime(tx.created_at)}</span>
+                    </div>
+                </div>
+
+                ${isPending ? `
+                <div class="pt-2 border-t border-slate-800/80 flex items-center space-x-2">
+                    <button type="button" onclick="resolveTx(${tx.id}, 'approve')" class="flex-1 py-1.5 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 text-xs font-bold transition-colors">
+                        Approve
+                    </button>
+                    <button type="button" onclick="resolveTx(${tx.id}, 'reject')" class="flex-1 py-1.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 text-xs font-bold transition-colors">
+                        Reject
+                    </button>
+                    <button type="button" onclick="resolveTx(${tx.id}, 'timeout')" class="flex-1 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 text-xs font-bold transition-colors">
+                        Timeout
+                    </button>
+                </div>` : ''}
+            </div>`;
+        }).join('');
+    }
+
+    function statusBadgeClass(st) {
+        switch(st) {
+            case 'approved': return 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30';
+            case 'pending':  return 'bg-amber-500/20 text-amber-400 border border-amber-500/30';
+            case 'rejected': return 'bg-rose-500/20 text-rose-400 border border-rose-500/30';
+            default: return 'bg-slate-700 text-slate-300';
+        }
+    }
+
+    async function resolveTx(id, action) {
+        try {
+            const res = await fetch(`/api/emulator/resolve/${id}`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]')?.content || ''
+                },
+                body: JSON.stringify({ action })
+            });
+            const data = await res.json();
+            if (data.success) {
+                showToast('success', `Transaction #${id} resolved: ${action.toUpperCase()}`);
+                loadTransactions();
+            } else {
+                showToast('error', data.error || 'Resolution failed');
+            }
+        } catch (err) {
+            showToast('error', 'Resolution error: ' + err.message);
+        }
+    }
+
+    function updateStats() {
+        const counts = { pending: 0, approved: 0, rejected: 0 };
+        allTransactions.forEach(t => { if (counts[t.status] !== undefined) counts[t.status]++; });
+        document.getElementById('stat-pending').textContent = counts.pending;
+        document.getElementById('stat-approved').textContent = counts.approved;
+        document.getElementById('stat-rejected').textContent = counts.rejected;
+        document.getElementById('stat-total').textContent = allTransactions.length;
+    }
+
+    function toggleAutoRefresh() {
+        autoRefresh = document.getElementById('autoRefresh').checked;
+        if (autoRefresh) startAutoRefresh();
+        else clearInterval(refreshInterval);
+    }
+
+    function startAutoRefresh() {
+        clearInterval(refreshInterval);
+        refreshInterval = setInterval(loadTransactions, 3000);
+    }
+
+    function formatTime(dtStr) {
+        if (!dtStr) return 'just now';
+        const d = new Date(dtStr);
+        return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    }
+
+    function showToast(type, msg) {
+        const t = document.getElementById('toast');
+        t.className = `fixed bottom-6 right-6 z-50 max-w-sm p-4 rounded-xl shadow-2xl text-xs font-semibold border ${
+            type === 'success' ? 'bg-emerald-950 border-emerald-500/40 text-emerald-300' :
+            type === 'error' ? 'bg-rose-950 border-rose-500/40 text-rose-300' :
+            'bg-sky-950 border-sky-500/40 text-sky-300'
+        }`;
+        t.textContent = msg;
+        t.classList.remove('hidden');
+        setTimeout(() => t.classList.add('hidden'), 4000);
+    }
 </script>
-
-<!-- CSRF meta tag for AJAX requests -->
-<meta name="csrf-token" content="{{ csrf_token() }}" />
-</body>
-</html>
+@endpush
