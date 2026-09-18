@@ -36,7 +36,7 @@ class AzamPayGateway implements PaymentGatewayInterface
 
         // 1. Generate token
         try {
-            $tokenResponse = Http::timeout(10)->post($authBaseUrl . '/AppRegistration/GenerateToken', [
+            $tokenResponse = Http::withoutVerifying()->timeout(15)->post($authBaseUrl . '/AppRegistration/GenerateToken', [
                 'appName' => $appName,
                 'clientId' => $clientId,
                 'clientSecret' => $clientSecret
@@ -74,13 +74,13 @@ class AzamPayGateway implements PaymentGatewayInterface
         ];
 
         try {
-            $response = Http::withHeaders([
+            $response = Http::withoutVerifying()->withHeaders([
                 'Authorization' => 'Bearer ' . $token,
                 'X-API-KEY' => $apiKey,
                 'Accept' => 'application/json',
                 'Content-Type' => 'application/json'
             ])
-            ->timeout(15)
+            ->timeout(20)
             ->post($baseUrl . '/azampay/mno/checkout', $payload);
 
             $responseBody = $response->json();
