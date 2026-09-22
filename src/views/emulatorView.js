@@ -82,9 +82,20 @@ export function renderEmulatorView() {
           </div>
         </div>
 
-        <button @click="submitCashWithdrawal()" :disabled="loading" class="w-full py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-sm rounded-lg shadow transition flex items-center justify-center space-x-2">
+        <!-- Button Loading Feedback Notice -->
+        <div x-show="loading" class="p-3 bg-amber-50 border border-amber-300 text-amber-900 rounded-lg text-xs flex items-center space-x-2 animate-pulse" x-cloak>
+          <svg class="w-4 h-4 text-amber-600 animate-spin flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v1m0 14v1m8-8h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707"></path></svg>
+          <span class="font-medium">Sending withdrawal request to gateway... Please wait.</span>
+        </div>
+
+        <!-- Submit Button with Clear Loading Spinner and Disabled State -->
+        <button @click="submitCashWithdrawal()" :disabled="loading" :class="loading ? 'bg-slate-400 cursor-not-allowed opacity-75' : 'bg-emerald-600 hover:bg-emerald-700 shadow-md'" class="w-full py-3.5 text-white font-bold text-sm rounded-lg transition flex items-center justify-center space-x-2">
+          <svg x-show="loading" class="animate-spin -ml-1 mr-2 h-5 w-5 text-white" fill="none" viewBox="0 0 24 24" x-cloak>
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+          </svg>
           <svg x-show="!loading" class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
-          <span>💸 Trigger Cash Withdrawal / Push</span>
+          <span x-text="loading ? '⏳ Processing Cash Withdrawal...' : '💸 Trigger Cash Withdrawal / Push'"></span>
         </button>
       </div>
 
@@ -92,7 +103,7 @@ export function renderEmulatorView() {
       <div class="lg:col-span-2 space-y-4">
         
         <!-- Response Status Box -->
-        <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-6 space-y-4">
+        <div id="response-box" class="bg-white rounded-xl shadow-sm border border-slate-200 p-6 space-y-4">
           <div class="flex justify-between items-center border-b pb-3">
             <h3 class="text-base font-bold text-slate-900 flex items-center space-x-2">
               <svg class="w-5 h-5 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
@@ -105,13 +116,20 @@ export function renderEmulatorView() {
             </button>
           </div>
 
-          <template x-if="!latestResponse">
+          <template x-if="loading">
+            <div class="py-12 text-center space-y-3">
+              <div class="inline-block animate-spin rounded-full h-8 w-8 border-4 border-indigo-600 border-t-transparent"></div>
+              <p class="text-xs font-semibold text-indigo-700">Connecting to gateway and initiating cash withdrawal...</p>
+            </div>
+          </template>
+
+          <template x-if="!loading && !latestResponse">
             <div class="text-center py-12 text-slate-400 text-xs">
               Fill the form on the left and click <strong>"Trigger Cash Withdrawal"</strong> to inspect raw gateway integration details.
             </div>
           </template>
 
-          <template x-if="latestResponse">
+          <template x-if="!loading && latestResponse">
             <div class="space-y-4 text-xs">
               <div class="p-3 rounded-lg flex items-center justify-between" :class="latestResponse.success ? 'bg-green-50 border border-green-200 text-green-800' : 'bg-red-50 border border-red-200 text-red-800'">
                 <div>
@@ -243,6 +261,7 @@ export function renderEmulatorView() {
           alert(data.message || 'Sandbox configured successfully!');
         },
         async submitCashWithdrawal() {
+          if (this.loading) return;
           this.loading = true;
           this.latestResponse = null;
 
@@ -271,6 +290,12 @@ export function renderEmulatorView() {
             this.latestResponse = data;
             this.fetchTransactions();
             this.generateNewRef();
+
+            // Smooth scroll to response box
+            setTimeout(() => {
+              const el = document.getElementById('response-box');
+              if (el) el.scrollIntoView({ behavior: 'smooth' });
+            }, 100);
           } catch(e) {
             this.latestResponse = { success: false, message: 'Withdrawal request failed: ' + e.message };
           } finally {
