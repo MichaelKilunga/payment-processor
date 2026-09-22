@@ -4,24 +4,32 @@ This guide explains how to connect your web application to the Payment Processor
 
 ---
 
+## Service Information
+
+* **Production URL**: `https://payment-processor.kahingaarnold2.workers.dev`
+* **Supported Gateways**: Selcom · AzamPay
+* **Sandbox & Emulator**: `https://payment-processor.kahingaarnold2.workers.dev/emulator`
+
+---
+
 ## How It Works
 
-The Payment Processor manages payment routing behind the scenes. 
+The Payment Processor manages payment routing behind the scenes.
 
-* **No provider selection needed:** Your web app does not specify or track which payment gateway is being used (e.g., M-Pesa, Tigo, Selcom, AzamPay). The active gateway is configured in the Payment Processor admin dashboard.
-* **USSD Push payments:** Payment initiation triggers a USSD push prompt on the customer's phone asking them to enter their mobile wallet PIN.
-* **Asynchronous updates:** When the customer approves the transaction, the processor notifies your app via a webhook callback.
+* **No provider selection needed**: Your web app does not need to manage provider differences between M-Pesa, Tigo, Airtel Money, Selcom, or AzamPay. The active gateway is managed via the Payment Processor admin dashboard.
+* **USSD Push & Card Payments**: Initiating payment triggers a USSD push prompt on the customer's mobile phone asking for their PIN, or generates a hosted payment URL for card checkout.
+* **Asynchronous Webhook Callbacks**: When the payment completes or fails, the processor automatically notifies your application via a webhook callback.
 
 ---
 
 ## 1. Initiate a Payment
 
-When a customer checks out, send a `POST` request to initiate the payment.
+When a customer checks out, send a `POST` request to initiate payment.
 
 ### Endpoint
 
 ```http
-POST https://ludicrous-unsorted-balance.ngrok-free.dev/api/v1/payments/initiate
+POST https://payment-processor.kahingaarnold2.workers.dev/api/v1/payments/initiate
 Content-Type: application/json
 Accept: application/json
 ```
@@ -30,14 +38,12 @@ Accept: application/json
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `amount` | numeric | Yes | Amount in TZS (e.g. `15000`) |
+| `amount` | numeric | Yes | Amount in TZS (minimum: `1`) |
 | `phone` | string | Yes | Customer phone number (e.g. `0712345678` or `255712345678`) |
 | `external_reference` | string | Yes | Unique order or invoice reference from your system |
 | `name` | string | No | Customer full name |
 | `email` | string | No | Customer email address |
 | `remarks` | string | No | Optional description or notes |
-
-> **Note:** Do not send a `gateway` or `provider` parameter. The processor handles provider selection automatically.
 
 ### Example Request
 
@@ -55,21 +61,22 @@ Accept: application/json
 ### Response Handling
 
 #### Success (`success: true`)
-A USSD prompt has been sent to the customer's phone.
+A USSD prompt has been sent to the customer's phone or a hosted payment URL was generated.
 
 ```json
 {
   "success": true,
   "external_reference": "INV-2026-881",
   "gateway_reference": "REF-89109312",
+  "payment_url": null,
   "message": "Payment initiated successfully."
 }
 ```
 
-**What to do in your UI:** Show a waiting message instructing the user to check their phone and enter their PIN to authorize the payment.
+**UI Recommendation**: Display a waiting message asking the customer to check their mobile phone and enter their PIN to authorize the payment.
 
 #### Error (`success: false`)
-The request failed (e.g., invalid phone format or provider issue).
+The request failed.
 
 ```json
 {
@@ -79,88 +86,62 @@ The request failed (e.g., invalid phone format or provider issue).
 }
 ```
 
-**What to do in your UI:** Show the error message to the customer so they can check their number and try again.
-
 ---
 
 ## 2. Receive Webhook Callbacks
 
-Once the customer completes the payment (or if it fails), the processor posts a notification to your callback URL.
+Once the customer completes the payment (or if it fails), the processor posts a notification payload to your application callback URL.
 
-### Setting Up Your Webhook URL
-In the Payment Processor **Admin Control Panel**, set your **Web App Callback URL**, for example:
+### Configuring Your Webhook URL
+In the Payment Processor **Admin Control Panel** (`https://payment-processor.kahingaarnold2.workers.dev/`), set your **WebApp Callback URL**:
 `https://yourwebapp.com/api/v1/payments/callback`
 
-### Webhook Payload
+### Webhook Payload Format
 
 ```json
 {
   "external_reference": "INV-2026-881",
+  "gateway": "azampay",
   "gateway_reference": "REF-89109312",
   "amount": 15000.00,
   "status": "success",
   "phone": "255712345678",
   "message": "Payment completed successfully",
-  "timestamp": "2026-07-21T17:45:00+03:00"
+  "timestamp": "2026-09-23T01:30:00.000Z"
 }
 ```
 
 * `status` will be either `"success"` or `"failed"`.
-* Your endpoint must return an **HTTP 200 OK** response to confirm receipt.
+* Your callback endpoint must return an **HTTP 200 OK** response.
 
 ---
 
-## 3. Manual Status Check & Network Fallbacks
+## 3. Manual Status Check & Fallbacks
 
-If a callback fails to deliver due to network issues or server downtime, your system should allow manual status verification.
-
-### Recommended Implementation
-Add a **"Recheck Payment Status"** button on pending orders in your customer dashboard or admin panel. When clicked, your backend queries the status endpoint to fetch the latest state.
+If a webhook callback is missed due to network downtime, your backend can query transaction status directly.
 
 ### Status Endpoint
 
 ```http
-GET https://ludicrous-unsorted-balance.ngrok-free.dev/api/v1/payments/status/{external_reference}
+GET https://payment-processor.kahingaarnold2.workers.dev/api/v1/payments/status/{external_reference}
 Accept: application/json
 ```
 
-### Possible Status Responses
+### Response Example
 
-#### 1. Payment Successful
 ```json
 {
   "success": true,
   "external_reference": "INV-2026-881",
   "status": "success",
   "amount": 15000.00,
+  "gateway": "azampay",
   "gateway_reference": "REF-89109312",
-  "message": "Payment completed successfully"
+  "message": "Payment completed successfully",
+  "created_at": "2026-09-23T01:30:00.000Z",
+  "updated_at": "2026-09-23T01:30:05.000Z"
 }
 ```
-Mark the order as paid in your database.
-
-#### 2. Payment Pending
-```json
-{
-  "success": true,
-  "external_reference": "INV-2026-881",
-  "status": "pending",
-  "amount": 15000.00,
-  "message": "Payment is pending"
-}
-```
-Keep order status as pending and prompt the user to complete PIN entry.
-
-#### 3. Payment Failed
-```json
-{
-  "success": true,
-  "external_reference": "INV-2026-881",
-  "status": "failed",
-  "message": "Payment failed"
-}
-```
-Mark the order as failed so the user can re-try.
 
 ---
 
@@ -177,9 +158,8 @@ use Illuminate\Support\Facades\Http;
 
 class PaymentController extends Controller
 {
-    private string $processorUrl = 'https://ludicrous-unsorted-balance.ngrok-free.dev';
+    private string $processorUrl = 'https://payment-processor.kahingaarnold2.workers.dev';
 
-    // Initiate payment
     public function checkout(Order $order)
     {
         $response = Http::post($this->processorUrl . '/api/v1/payments/initiate', [
@@ -203,7 +183,6 @@ class PaymentController extends Controller
         return back()->with('error', $result['message'] ?? 'Could not initiate payment.');
     }
 
-    // Manual status recheck button action
     public function recheckStatus(string $orderId)
     {
         $response = Http::get($this->processorUrl . "/api/v1/payments/status/{$orderId}");
@@ -220,10 +199,9 @@ class PaymentController extends Controller
             }
         }
 
-        return back()->with('info', 'Payment is still pending PIN entry.');
+        return back()->with('info', 'Payment is pending.');
     }
 
-    // Webhook callback handler
     public function handleWebhook(Request $request)
     {
         $order = Order::find($request->input('external_reference'));
@@ -247,9 +225,8 @@ const axios = require('axios');
 const app = express();
 app.use(express.json());
 
-const PROCESSOR_URL = 'https://ludicrous-unsorted-balance.ngrok-free.dev';
+const PROCESSOR_URL = 'https://payment-processor.kahingaarnold2.workers.dev';
 
-// Initiate payment
 app.post('/checkout', async (req, res) => {
   const { amount, phone, orderId, name, email } = req.body;
 
@@ -263,7 +240,7 @@ app.post('/checkout', async (req, res) => {
     });
 
     if (data.success) {
-      return res.json({ success: true, message: 'Check your phone for USSD PIN prompt.' });
+      return res.json({ success: true, message: 'Payment initiated successfully.' });
     }
     return res.status(400).json({ success: false, error: data.message });
   } catch (err) {
@@ -271,7 +248,6 @@ app.post('/checkout', async (req, res) => {
   }
 });
 
-// Manual status recheck
 app.get('/recheck-status/:orderId', async (req, res) => {
   try {
     const { data } = await axios.get(`${PROCESSOR_URL}/api/v1/payments/status/${req.params.orderId}`);
@@ -281,12 +257,9 @@ app.get('/recheck-status/:orderId', async (req, res) => {
   }
 });
 
-// Webhook listener
 app.post('/api/v1/payments/callback', (req, res) => {
   const { external_reference, status } = req.body;
   console.log(`Order ${external_reference} status update: ${status}`);
-
-  // Update order in database here
 
   return res.status(200).send('OK');
 });
@@ -294,36 +267,11 @@ app.post('/api/v1/payments/callback', (req, res) => {
 
 ---
 
-### Python (Requests)
-
-```python
-import requests
-
-PROCESSOR_URL = "https://ludicrous-unsorted-balance.ngrok-free.dev"
-
-def initiate_payment(amount, phone, order_id, name=None, email=None):
-    payload = {
-        "amount": amount,
-        "phone": phone,
-        "external_reference": str(order_id),
-        "name": name,
-        "email": email
-    }
-    res = requests.post(f"{PROCESSOR_URL}/api/v1/payments/initiate", json=payload)
-    return res.json()
-
-def check_status(order_id):
-    res = requests.get(f"{PROCESSOR_URL}/api/v1/payments/status/{order_id}")
-    return res.json()
-```
-
----
-
-### cURL
+### cURL Examples
 
 ```bash
-# Initiate payment
-curl -X POST https://ludicrous-unsorted-balance.ngrok-free.dev/api/v1/payments/initiate \
+# 1. Initiate payment
+curl -X POST https://payment-processor.kahingaarnold2.workers.dev/api/v1/payments/initiate \
   -H "Content-Type: application/json" \
   -d '{
     "amount": 15000,
@@ -331,6 +279,6 @@ curl -X POST https://ludicrous-unsorted-balance.ngrok-free.dev/api/v1/payments/i
     "external_reference": "INV-2026-881"
   }'
 
-# Check status manually
-curl -X GET https://ludicrous-unsorted-balance.ngrok-free.dev/api/v1/payments/status/INV-2026-881
+# 2. Check payment status
+curl -X GET https://payment-processor.kahingaarnold2.workers.dev/api/v1/payments/status/INV-2026-881
 ```
