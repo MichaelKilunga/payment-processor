@@ -10,7 +10,8 @@
     {
       "binding": "DB",
       "database_name": "payment-processor-db",
-      "database_id": "55b4f5a9-aa42-409a-ae3c-8fbc0cc9d5b2"
+      "database_id": "36938229-9ed6-4998-b779-578340052bef"
+      // "database_id": "local-payment-processor-db"
     }
   ]
 }

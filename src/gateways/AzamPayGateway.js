@@ -6,8 +6,24 @@ export class AzamPayGateway {
   }
 
   async initiatePayment(dbClient, params) {
-    const baseUrl = (await dbClient.getConfig('azampay_base_url')).replace(/\/+$/, '');
-    const authBaseUrl = (await dbClient.getConfig('azampay_auth_base_url')).replace(/\/+$/, '');
+    const rawBaseUrl = await dbClient.getConfig('azampay_base_url');
+    const rawAuthBaseUrl = await dbClient.getConfig('azampay_auth_base_url');
+
+    if (!rawAuthBaseUrl || !rawBaseUrl) {
+      return {
+        success: false,
+        error:
+          'AzamPay Base URL or Auth Base URL is not configured. If testing in Sandbox, please click "⚡ Switch Gateway URLs to Sandbox Emulator" on the Sandbox page to set sandbox endpoints.',
+        raw_response: {
+          azampay_base_url: rawBaseUrl,
+          azampay_auth_base_url: rawAuthBaseUrl,
+        },
+      };
+    }
+
+    const baseUrl = rawBaseUrl.replace(/\/+$/, '');
+    const authBaseUrl = rawAuthBaseUrl.replace(/\/+$/, '');
+
     const clientId = await dbClient.getConfig('azampay_client_id');
     const clientSecret = await dbClient.getConfig('azampay_client_secret');
     const appName = await dbClient.getConfig('azampay_app_name');
@@ -27,6 +43,7 @@ export class AzamPayGateway {
     // 1. Generate token
     let token = null;
     let tokenData = null;
+    let rawText = '';
 
     try {
       const tokenRes = await fetch(`${authBaseUrl}/AppRegistration/GenerateToken`, {
@@ -39,7 +56,13 @@ export class AzamPayGateway {
         }),
       });
 
-      tokenData = await tokenRes.json().catch(() => null);
+      rawText = await tokenRes.text().catch(() => '');
+      try {
+        tokenData = JSON.parse(rawText);
+      } catch (e) {
+        tokenData = null;
+      }
+
       if (tokenData) {
         token =
           tokenData.token ||
@@ -49,10 +72,16 @@ export class AzamPayGateway {
       }
 
       if (!tokenRes.ok || !token) {
+        const errMsg =
+          tokenData?.message ||
+          (tokenRes.status === 404
+            ? `Auth endpoint not found at ${authBaseUrl}/AppRegistration/GenerateToken`
+            : `Authentication endpoint rejected credentials (HTTP ${tokenRes.status})`);
+
         return {
           success: false,
-          error: `Failed to generate AzamPay token: ${tokenData?.message || 'Unknown error'}`,
-          raw_response: tokenData,
+          error: `Failed to generate AzamPay token: ${errMsg}`,
+          raw_response: tokenData || { status: tokenRes.status, body: rawText },
         };
       }
     } catch (e) {
@@ -86,7 +115,13 @@ export class AzamPayGateway {
         body: JSON.stringify(payload),
       });
 
-      const responseBody = await checkoutRes.json().catch(() => null);
+      const checkoutText = await checkoutRes.text().catch(() => '');
+      let responseBody = null;
+      try {
+        responseBody = JSON.parse(checkoutText);
+      } catch (e) {
+        responseBody = null;
+      }
 
       if (
         checkoutRes.ok &&
@@ -103,8 +138,8 @@ export class AzamPayGateway {
 
       return {
         success: false,
-        error: responseBody?.message || 'Gateway failed to initiate payment',
-        raw_response: responseBody || (await checkoutRes.text().catch(() => '')),
+        error: responseBody?.message || `Gateway failed to initiate payment (HTTP ${checkoutRes.status})`,
+        raw_response: responseBody || { status: checkoutRes.status, body: checkoutText },
       };
     } catch (e) {
       console.error('AzamPay initiatePayment error:', e);

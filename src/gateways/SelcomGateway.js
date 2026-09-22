@@ -6,7 +6,17 @@ export class SelcomGateway {
   }
 
   async initiatePayment(dbClient, params, originUrl = '') {
-    const baseUrl = (await dbClient.getConfig('selcom_base_url')).replace(/\/+$/, '');
+    const rawBaseUrl = await dbClient.getConfig('selcom_base_url');
+    if (!rawBaseUrl) {
+      return {
+        success: false,
+        error:
+          'Selcom Base URL is not configured. If testing in Sandbox, please click "⚡ Switch Gateway URLs to Sandbox Emulator" on the Sandbox page to set sandbox endpoints.',
+        raw_response: { selcom_base_url: rawBaseUrl },
+      };
+    }
+
+    const baseUrl = rawBaseUrl.replace(/\/+$/, '');
     const apiKey = await dbClient.getConfig('selcom_api_key');
     const apiSecret = await dbClient.getConfig('selcom_secret_key');
     const vendor = await dbClient.getConfig('selcom_vendor');
@@ -44,7 +54,13 @@ export class SelcomGateway {
         body: JSON.stringify(orderMinArray),
       });
 
-      const responseBody = await response.json().catch(() => null);
+      const rawText = await response.text().catch(() => '');
+      let responseBody = null;
+      try {
+        responseBody = JSON.parse(rawText);
+      } catch (e) {
+        responseBody = null;
+      }
 
       if (
         response.ok &&
@@ -71,8 +87,8 @@ export class SelcomGateway {
 
       return {
         success: false,
-        error: responseBody?.message || 'Gateway failed to initiate payment',
-        raw_response: responseBody || (await response.text().catch(() => '')),
+        error: responseBody?.message || `Gateway failed to initiate payment (HTTP ${response.status})`,
+        raw_response: responseBody || { status: response.status, body: rawText },
       };
     } catch (e) {
       console.error('Selcom initiatePayment error:', e);
