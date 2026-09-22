@@ -1,58 +1,102 @@
-<p align="center"><a href="https://laravel.com" target="_blank"><img src="https://raw.githubusercontent.com/laravel/art/master/logo-lockup/5%20SVG/2%20CMYK/1%20Full%20Color/laravel-logolockup-cmyk-red.svg" width="400" alt="Laravel Logo"></a></p>
+# Payment Processor Middleware (Cloudflare Workers + JavaScript)
 
-<p align="center">
-<a href="https://github.com/laravel/framework/actions"><img src="https://github.com/laravel/framework/workflows/tests/badge.svg" alt="Build Status"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/dt/laravel/framework" alt="Total Downloads"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/v/laravel/framework" alt="Latest Stable Version"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/l/laravel/framework" alt="License"></a>
-</p>
+A high-performance, ultra-low-latency payment processor middleware built in pure JavaScript for **Cloudflare Workers**, **Hono**, and **Cloudflare D1**.
 
-## About Laravel
+It acts as a standalone middleware service between your web application and mobile money payment gateways in Tanzania (**Selcom** and **AzamPay**).
 
-Laravel is a web application framework with expressive, elegant syntax. We believe development must be an enjoyable and creative experience to be truly fulfilling. Laravel takes the pain out of development by easing common tasks used in many web projects, such as:
+---
 
-- [Simple, fast routing engine](https://laravel.com/docs/routing).
-- [Powerful dependency injection container](https://laravel.com/docs/container).
-- Multiple back-ends for [session](https://laravel.com/docs/session) and [cache](https://laravel.com/docs/cache) storage.
-- Expressive, intuitive [database ORM](https://laravel.com/docs/eloquent).
-- Database agnostic [schema migrations](https://laravel.com/docs/migrations).
-- [Robust background job processing](https://laravel.com/docs/queues).
-- [Real-time event broadcasting](https://laravel.com/docs/broadcasting).
+## Key Features
 
-Laravel is accessible, powerful, and provides tools required for large, robust applications.
+- **Pure JavaScript & Cloudflare Workers**: Native V8 execution at 300+ global edge locations with 0ms cold starts.
+- **Selcom Gateway Driver**: Standard Minimal Checkout API, HMAC SHA256 header generation, signature verification, and callback parsing.
+- **AzamPay Gateway Driver**: Token generation, MNO checkout (USSD Push), automatic phone operator detection (Vodacom Mpesa, Tigo Pesa, Airtel Money, HaloPesa, AzamPesa), HMAC signature verification.
+- **Serverless SQL Database (Cloudflare D1)**: Persistent storage for configurations, payment logs, and sandbox emulator transactions.
+- **Admin Configuration Dashboard (`/`)**: Web UI to manage credentials, active gateway driver, webapp callback URL, live connection testing, and transaction log management with bulk deletion/retry and CSV/JSON exports.
+- **Built-in Payment Emulator (`/emulator`)**: Interactive sandbox to test payment initiation, USSD pushes, and webhooks locally without real credentials.
 
-## Learning Laravel
+---
 
-Laravel has the most extensive and thorough [documentation](https://laravel.com/docs) and video tutorial library of all modern web application frameworks, making it a breeze to get started with the framework.
+## Architecture Overview
 
-In addition, [Laracasts](https://laracasts.com) contains thousands of video tutorials on a range of topics including Laravel, modern PHP, unit testing, and JavaScript. Boost your skills by digging into our comprehensive video library.
-
-You can also watch bite-sized lessons with real-world projects on [Laravel Learn](https://laravel.com/learn), where you will be guided through building a Laravel application from scratch while learning PHP fundamentals.
-
-## Agentic Development
-
-Laravel's predictable structure and conventions make it ideal for AI coding agents like Claude Code, Cursor, and GitHub Copilot. Install [Laravel Boost](https://laravel.com/docs/ai) to supercharge your AI workflow:
-
-```bash
-composer require laravel/boost --dev
-
-php artisan boost:install
+```
+┌───────────────────────────────┐
+│   Client Application / WebApp │
+└───────────────┬───────────────┘
+                │ HTTP POST /api/v1/payments/initiate
+                ▼
+┌─────────────────────────────────────────────────────────────┐
+│             Cloudflare Worker (Hono + JavaScript)           │
+├───────────────────────────────┬─────────────────────────────┤
+│  API Routes (`src/routes/`)   │  Admin Panel & Emulator UI  │
+├───────────────────────────────┴─────────────────────────────┤
+│  Gateway Drivers (`src/gateways/`)                          │
+│  - SelcomGateway.js                                         │
+│  - AzamPayGateway.js                                        │
+└───────────────┬───────────────────────────────┬─────────────┘
+                │                               │
+                ▼                               ▼
+    ┌───────────────────────┐       ┌──────────────────────┐
+    │  Cloudflare D1 (SQL)  │       │  Selcom & AzamPay    │
+    │  - configs            │       │  External Gateways   │
+    │  - payment_logs       │       └──────────────────────┘
+    │  - emulator_txns      │
+    └───────────────────────┘
 ```
 
-Boost provides your agent 15+ tools and skills that help agents build Laravel applications while following best practices.
+---
 
-## Contributing
+## Getting Started
 
-Thank you for considering contributing to the Laravel framework! The contribution guide can be found in the [Laravel documentation](https://laravel.com/docs/contributions).
+### 1. Install Dependencies
 
-## Code of Conduct
+```bash
+npm install
+```
 
-In order to ensure that the Laravel community is welcoming to all, please review and abide by the [Code of Conduct](https://laravel.com/docs/contributions#code-of-conduct).
+### 2. Run Local Development Server
 
-## Security Vulnerabilities
+```bash
+npm run dev
+```
 
-If you discover a security vulnerability within Laravel, please send an e-mail to Taylor Otwell via [taylor@laravel.com](mailto:taylor@laravel.com). All security vulnerabilities will be promptly addressed.
+This starts the Cloudflare Workers dev server using **Wrangler** (usually at `http://localhost:8787`).
 
-## License
+### 3. Initialize Local D1 Database Schema
 
-The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).
+To initialize or reset the local SQLite database schema:
+
+```bash
+npm run db:migrate:local
+```
+
+---
+
+## Deploying to Cloudflare
+
+To deploy your worker to production on Cloudflare Workers:
+
+```bash
+# 1. Create a remote D1 database (first time only)
+npx wrangler d1 create payment-processor-db
+
+# 2. Update `wrangler.jsonc` with the database_id returned by wrangler
+
+# 3. Apply schema migrations to remote D1
+npm run db:migrate
+
+# 4. Deploy worker to production
+npm run deploy
+```
+
+---
+
+## API Summary
+
+- `POST /api/v1/payments/initiate` — Initiate a payment
+- `GET /api/v1/payments/status/:external_reference` — Check payment status
+- `POST /api/v1/callbacks/:gateway` — Webhook endpoint for gateways
+- `GET /api/v1/config` & `POST /api/v1/config` — Retrieve / Update middleware configurations
+- `GET /api/v1/logs` — Query transaction logs JSON
+
+For full integration details, see `integration_guide.md`.
