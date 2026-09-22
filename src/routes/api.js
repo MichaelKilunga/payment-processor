@@ -58,6 +58,7 @@ apiRoutes.post('/v1/payments/initiate', async (c) => {
       name,
       external_reference,
       remarks,
+      provider: body.provider,
     },
     originUrl
   );

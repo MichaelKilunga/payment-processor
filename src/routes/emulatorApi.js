@@ -13,6 +13,38 @@ function generateRandomString(length) {
   return res;
 }
 
+// Quick Auto-Configure Gateway URLs to point to Sandbox Emulator
+emulatorApiRoutes.post('/configure-sandbox', async (c) => {
+  const dbClient = new DbClient(c.env.DB);
+  const origin = new URL(c.req.url).origin;
+
+  await dbClient.setConfig('selcom_base_url', `${origin}/api/emulator/selcom`);
+  await dbClient.setConfig('azampay_base_url', `${origin}/api/emulator/azampay`);
+  await dbClient.setConfig('azampay_auth_base_url', `${origin}/api/emulator/azampay`);
+
+  // Default sandbox credentials if empty
+  if (!(await dbClient.getConfig('selcom_api_key'))) {
+    await dbClient.setConfig('selcom_api_key', 'emulator_api_key');
+    await dbClient.setConfig('selcom_secret_key', 'emulator_secret');
+    await dbClient.setConfig('selcom_vendor', 'EMU_TILL_123');
+  }
+
+  if (!(await dbClient.getConfig('azampay_client_id'))) {
+    await dbClient.setConfig('azampay_client_id', 'emulator_client_id');
+    await dbClient.setConfig('azampay_client_secret', 'emulator_secret');
+    await dbClient.setConfig('azampay_app_name', 'EmulatorApp');
+    await dbClient.setConfig('azampay_api_key', 'emulator_api_key');
+  }
+
+  return c.json({
+    success: true,
+    message: 'Processor successfully configured to point to Sandbox Emulator endpoints!',
+    selcom_base_url: `${origin}/api/emulator/selcom`,
+    azampay_base_url: `${origin}/api/emulator/azampay`,
+    azampay_auth_base_url: `${origin}/api/emulator/azampay`,
+  });
+});
+
 // Fake AzamPay GenerateToken
 emulatorApiRoutes.post('/azampay/AppRegistration/GenerateToken', async (c) => {
   const token = 'emulator_' + generateRandomString(48);
@@ -140,7 +172,6 @@ emulatorApiRoutes.post('/resolve/:id', async (c) => {
   await dbClient.updateEmulatorTxn(id, { status: resolvedStatus });
 
   const originUrl = new URL(c.req.url).origin;
-  // Fire callback asynchronously to processor callback endpoint
   await fireCallback(dbClient, transaction, resolvedStatus, originUrl);
 
   const updatedTxn = await dbClient.findEmulatorTxnById(id);
