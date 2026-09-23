@@ -13,7 +13,7 @@ export class AzamPayGateway {
       return {
         success: false,
         error:
-          'AzamPay Base URL or Auth Base URL is not configured. If testing in Sandbox, please click "⚡ Switch Gateway URLs to Sandbox Emulator" on the Sandbox page to set sandbox endpoints.',
+          'AzamPay Base URL or Auth Base URL is not configured. If testing in Sandbox, please click "Switch Gateway Base URLs to Sandbox" on the Sandbox page to set sandbox endpoints.',
         raw_response: {
           azampay_base_url: rawBaseUrl,
           azampay_auth_base_url: rawAuthBaseUrl,
@@ -21,13 +21,13 @@ export class AzamPayGateway {
       };
     }
 
-    const baseUrl = rawBaseUrl.replace(/\/+$/, '');
-    const authBaseUrl = rawAuthBaseUrl.replace(/\/+$/, '');
+    const baseUrl = rawBaseUrl.trim().replace(/\/+$/, '');
+    const authBaseUrl = rawAuthBaseUrl.trim().replace(/\/+$/, '');
 
-    const clientId = await dbClient.getConfig('azampay_client_id');
-    const clientSecret = await dbClient.getConfig('azampay_client_secret');
-    const appName = await dbClient.getConfig('azampay_app_name');
-    const apiKey = await dbClient.getConfig('azampay_api_key');
+    const clientId = (await dbClient.getConfig('azampay_client_id')).trim();
+    const clientSecret = (await dbClient.getConfig('azampay_client_secret')).trim();
+    const appName = (await dbClient.getConfig('azampay_app_name')).trim();
+    const apiKey = (await dbClient.getConfig('azampay_api_key')).trim();
 
     const phone = this.formatPhoneNumber(params.phone || '');
     const provider = params.provider || this.detectOperator(phone);
@@ -74,7 +74,9 @@ export class AzamPayGateway {
       if (!tokenRes.ok || !token) {
         const errMsg =
           tokenData?.message ||
-          (tokenRes.status === 404
+          (tokenRes.status === 401
+            ? `Authentication failed (HTTP 401). Check that your AzamPay Auth URL is set to the Live endpoint (https://authenticator.azampay.co.tz) and appName/clientId/clientSecret match your Live portal.`
+            : tokenRes.status === 404
             ? `Auth endpoint not found at ${authBaseUrl}/AppRegistration/GenerateToken`
             : `Authentication endpoint rejected credentials (HTTP ${tokenRes.status})`);
 
@@ -157,7 +159,7 @@ export class AzamPayGateway {
       return true; // If no signature provided in emulator/sandbox, pass through
     }
 
-    const secret = await dbClient.getConfig('azampay_client_secret');
+    const secret = (await dbClient.getConfig('azampay_client_secret')).trim();
     if (!secret) return true;
 
     const computed = crypto

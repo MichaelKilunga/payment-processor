@@ -124,10 +124,10 @@ async function handleConnectionTest(c, dbClient, gatewayToTest, formData) {
   }
 
   if (gatewayToTest === 'azampay') {
-    const authBaseUrl = (formData.azampay_auth_base_url || '').replace(/\/+$/, '');
-    const clientId = formData.azampay_client_id || '';
-    const clientSecret = formData.azampay_client_secret || '';
-    const appName = formData.azampay_app_name || '';
+    const authBaseUrl = (formData.azampay_auth_base_url || '').trim().replace(/\/+$/, '');
+    const clientId = (formData.azampay_client_id || '').trim();
+    const clientSecret = (formData.azampay_client_secret || '').trim();
+    const appName = (formData.azampay_app_name || '').trim();
 
     if (!authBaseUrl || !clientId || !clientSecret) {
       const configs = await dbClient.getAllConfigs();
