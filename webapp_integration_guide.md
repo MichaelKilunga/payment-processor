@@ -1,51 +1,103 @@
 # Payment Processor Integration Guide
 
-This guide explains how to connect your web application to the Payment Processor API.
+Comprehensive integration documentation for web application developers connecting to the **Payment Processor Middleware API**.
 
 ---
 
-## Service Information
+## 1. Overview & Architecture
 
-* **Production URL**: `https://payment-processor.kahingaarnold2.workers.dev`
-* **Supported Gateways**: Selcom · AzamPay
-* **Sandbox & Emulator**: `https://payment-processor.kahingaarnold2.workers.dev/emulator`
+The Payment Processor is a standalone middleware service built on **Cloudflare Workers** and **Cloudflare D1**. It unifies payment gateways in Tanzania (**AzamPay** and **Selcom**) into a single, standardized REST API for your web application.
+
+### Key Benefits
+
+- **Single API Integration**: Your web application interacts with one clean API. Mobile money operator detection (Vodacom M-Pesa, Tigo Pesa, Airtel Money, HaloPesa, AzamPesa) and gateway switching are handled automatically behind the scenes.
+- **USSD Push & Card Payments**: Initiates direct USSD PIN prompt triggers to the customer's phone or generates hosted checkout URLs for card payments.
+- **Real-Time Webhooks**: Asynchronously notifies your web application via HTTP POST webhooks upon payment completion or failure.
+- **Auto-Fallback Status Queries**: Automatically queries live gateway provider APIs directly if a transaction status is pending during a status check.
+
+### Flow Diagram
+
+```
+┌────────────────────────────────┐
+│        Customer WebApp         │
+└───────────────┬────────────────┘
+                │ 1. POST /api/v1/payments/initiate
+                ▼
+┌────────────────────────────────┐
+│   Payment Processor Middleware │
+└───────────────┬────────────────┘
+                │ 2. Trigger USSD Push / Hosted Checkout
+                ▼
+┌────────────────────────────────┐
+│  Gateways (AzamPay / Selcom)   │ ──► Customer Enters PIN on Phone
+└───────────────┬────────────────┘
+                │ 3. Webhook / Callback Notification
+                ▼
+┌────────────────────────────────┐
+│   Payment Processor Middleware │
+└───────────────┬────────────────┘
+                │ 4. Forward Webhook (HTTP POST)
+                ▼
+┌────────────────────────────────┐
+│   Your Web App Callback URL    │ ──► Update Order Status to Paid / Failed
+└────────────────────────────────┘
+```
 
 ---
 
-## How It Works
+## 2. Environment Setup
 
-The Payment Processor manages payment routing behind the scenes.
+### Endpoints
 
-* **No provider selection needed**: Your web app does not need to manage provider differences between M-Pesa, Tigo, Airtel Money, Selcom, or AzamPay. The active gateway is managed via the Payment Processor admin dashboard.
-* **USSD Push & Card Payments**: Initiating payment triggers a USSD push prompt on the customer's mobile phone asking for their PIN, or generates a hosted payment URL for card checkout.
-* **Asynchronous Webhook Callbacks**: When the payment completes or fails, the processor automatically notifies your application via a webhook callback.
+| Environment | Base URL | Admin Panel & Traffic Inspector |
+|---|---|---|
+| **Production** | `https://payment-processor.kahingaarnold2.workers.dev` | `https://payment-processor.kahingaarnold2.workers.dev/` |
+| **Sandbox / Emulator** | `https://payment-processor.kahingaarnold2.workers.dev` | `https://payment-processor.kahingaarnold2.workers.dev/emulator` |
+| **Local Development** | `http://localhost:8787` | `http://localhost:8787/` |
+
+### Web Application Environment Variables
+
+Add the following configuration variables to your web application's `.env` file:
+
+```env
+# Payment Processor Base URL
+PAYMENT_PROCESSOR_URL=https://payment-processor.kahingaarnold2.workers.dev
+
+# Web App Public Webhook Endpoint (Where payment notifications will be received)
+WEBAPP_CALLBACK_URL=https://yourwebapp.com/api/v1/payments/callback
+```
 
 ---
 
-## 1. Initiate a Payment
+## 3. Step-by-Step Integration
 
-When a customer checks out, send a `POST` request to initiate payment.
+---
 
-### Endpoint
+### Step 1: Initiate a Payment
+
+When a customer checks out, your web application backend sends a `POST` request to initiate payment.
+
+#### Endpoint
 
 ```http
-POST https://payment-processor.kahingaarnold2.workers.dev/api/v1/payments/initiate
+POST /api/v1/payments/initiate
 Content-Type: application/json
 Accept: application/json
 ```
 
-### Request Payload
+#### Request Payload Parameters
 
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `amount` | numeric | Yes | Amount in TZS (minimum: `1`) |
-| `phone` | string | Yes | Customer phone number (e.g. `0712345678` or `255712345678`) |
-| `external_reference` | string | Yes | Unique order or invoice reference from your system |
-| `name` | string | No | Customer full name |
-| `email` | string | No | Customer email address |
-| `remarks` | string | No | Optional description or notes |
+| Parameter | Type | Required | Description | Example |
+|---|---|---|---|---|
+| `amount` | number / string | **Yes** | Payment amount in TZS (minimum: `1`). | `15000` |
+| `phone` | string | **Yes** | Customer phone number (supports local `07...` or intl `255...`). | `"0712345678"` |
+| `external_reference` | string | **Yes** | Unique Order ID or Invoice ID generated by your web app. | `"INV-2026-881"` |
+| `name` | string | No | Customer full name. | `"Jane Doe"` |
+| `email` | string | No | Customer email address. | `"jane@example.com"` |
+| `remarks` | string | No | Description or item breakdown. | `"Order #INV-2026-881"` |
+| `gateway` | string | No | Override active gateway (`"azampay"` or `"selcom"`). If omitted, uses dashboard active gateway. | `"azampay"` |
 
-### Example Request
+#### Example Request
 
 ```json
 {
@@ -58,10 +110,7 @@ Accept: application/json
 }
 ```
 
-### Response Handling
-
-#### Success (`success: true`)
-A USSD prompt has been sent to the customer's phone or a hosted payment URL was generated.
+#### Success Response (`200 OK`)
 
 ```json
 {
@@ -73,30 +122,29 @@ A USSD prompt has been sent to the customer's phone or a hosted payment URL was 
 }
 ```
 
-**UI Recommendation**: Display a waiting message asking the customer to check their mobile phone and enter their PIN to authorize the payment.
+> **Frontend UX Guidance**: When `success` is `true`, display a modal/screen asking the customer to check their mobile phone and enter their Mobile Money PIN. If `payment_url` is provided (for card checkout), redirect the customer to `payment_url`.
 
-#### Error (`success: false`)
-The request failed.
+#### Error Response (`400 Bad Request` / `502 Bad Gateway`)
 
 ```json
 {
   "success": false,
   "external_reference": "INV-2026-881",
-  "message": "Invalid phone number format."
+  "message": "The phone field is required."
 }
 ```
 
 ---
 
-## 2. Receive Webhook Callbacks
+### Step 2: Receive & Handle Webhook Callbacks
 
-Once the customer completes the payment (or if it fails), the processor posts a notification payload to your application callback URL.
+When the customer completes the payment (or if it fails), the processor sends an HTTP `POST` webhook to your configured `WEBAPP_CALLBACK_URL`.
 
-### Configuring Your Webhook URL
-In the Payment Processor **Admin Control Panel** (`https://payment-processor.kahingaarnold2.workers.dev/`), set your **WebApp Callback URL**:
+#### 1. Configuring Your Callback URL
+In the Payment Processor Admin Dashboard (`/`), set the **WebApp Callback URL**:
 `https://yourwebapp.com/api/v1/payments/callback`
 
-### Webhook Payload Format
+#### 2. Webhook Payload Format
 
 ```json
 {
@@ -107,41 +155,48 @@ In the Payment Processor **Admin Control Panel** (`https://payment-processor.kah
   "status": "success",
   "phone": "255712345678",
   "message": "Payment completed successfully",
-  "timestamp": "2026-09-23T01:30:00.000Z"
+  "timestamp": "2026-09-24T19:30:00.000Z"
 }
 ```
 
-* `status` will be either `"success"` or `"failed"`.
-* Your callback endpoint must return an **HTTP 200 OK** response.
+#### Field Definitions
+
+- `external_reference`: The Order ID sent during payment initiation.
+- `status`: `"success"` or `"failed"`.
+- `gateway_reference`: Unique transaction ID issued by the gateway provider.
+- `amount`: Confirmed transaction amount.
+
+#### Webhook Best Practices
+
+1. **Respond Quickly**: Return an HTTP `200 OK` status immediately after validating the order.
+2. **Idempotency**: Check if the order is already marked as `paid` before processing fulfillment to avoid duplicate processing.
 
 ---
 
-## 3. Manual Status Check & Fallbacks
+### Step 3: Check Payment Status & Polling
 
-If a webhook callback is delayed or when polling status from your web app frontend, your backend can query transaction status directly.
+Use status checks for backend verification, manual re-checks, or frontend polling while waiting for USSD completion.
 
-### Automatic Live Gateway Query Fallback
+#### Automatic Live Gateway Query Fallback
+If the transaction in the middleware database is still `pending` when checked, the processor **automatically queries the gateway provider (AzamPay/Selcom) directly**. If confirmed, it updates its database, triggers the webhook callback to your web app, and returns the updated status immediately.
 
-When a status check request is received by the processor:
-- If the transaction status is **not yet updated (`pending`)**, the processor automatically queries **AzamPay** (or Selcom) directly.
-- If AzamPay confirms the payment is `success` or `failed`, the processor automatically updates its database, posts the callback to your WebApp callback URL, and returns the updated feedback payload immediately!
+#### Endpoints
 
-### Status Check Endpoints
+- **GET Method** (Recommended for REST polling):
+  `GET /api/v1/payments/status/{external_reference}`
 
-```http
-GET https://payment-processor.kahingaarnold2.workers.dev/api/v1/payments/status/{external_reference}
-POST https://payment-processor.kahingaarnold2.workers.dev/api/v1/payments/check-status
-Content-Type: application/json
-```
+- **POST Method**:
+  `POST /api/v1/payments/check-status`
 
-#### Request Payload (POST)
+#### Request Payload (POST Method)
+
 ```json
 {
   "external_reference": "INV-2026-881"
 }
 ```
 
-### Response Example
+#### Response Example (`200 OK`)
 
 ```json
 {
@@ -161,16 +216,80 @@ Content-Type: application/json
 
 ---
 
-## 4. Full Request Logging & Traffic Inspector
+## 4. Code Implementation Examples
 
-Every request received from your web app and every request sent to gateway providers or web app callbacks is logged with full details (headers, payload, status code, latency).
+### Node.js (Express & Axios)
 
-- **View Live Traffic**: Open Control Panel → **Request Inspector** tab.
-- **Fetch Logs via API**: `GET /api/v1/requests`
+```javascript
+import express from 'express';
+import axios from 'axios';
+
+const app = express();
+app.use(express.json());
+
+const PROCESSOR_URL = process.env.PAYMENT_PROCESSOR_URL || 'https://payment-processor.kahingaarnold2.workers.dev';
+
+// 1. Checkout Endpoint
+app.post('/api/checkout', async (req, res) => {
+  const { amount, phone, orderId, name, email } = req.body;
+
+  try {
+    const response = await axios.post(`${PROCESSOR_URL}/api/v1/payments/initiate`, {
+      amount,
+      phone,
+      external_reference: orderId,
+      name,
+      email,
+      remarks: `Order #${orderId}`
+    });
+
+    if (response.data.success) {
+      return res.json({
+        success: true,
+        message: 'Payment initiated. Please check your phone for the USSD prompt.',
+        gateway_reference: response.data.gateway_reference
+      });
+    }
+
+    return res.status(400).json({ success: false, message: response.data.message });
+  } catch (error) {
+    const errorMessage = error.response?.data?.message || 'Payment initiation failed';
+    return res.status(500).json({ success: false, message: errorMessage });
+  }
+});
+
+// 2. Status Check Endpoint
+app.get('/api/payment-status/:orderId', async (req, res) => {
+  try {
+    const response = await axios.get(`${PROCESSOR_URL}/api/v1/payments/status/${req.params.orderId}`);
+    return res.json(response.data);
+  } catch (error) {
+    return res.status(400).json({ success: false, message: 'Status check failed' });
+  }
+});
+
+// 3. Webhook Callback Listener
+app.post('/api/v1/payments/callback', (req, res) => {
+  const { external_reference, status, gateway_reference, amount } = req.body;
+
+  console.log(`Received callback for Order: ${external_reference}, Status: ${status}`);
+
+  if (status === 'success') {
+    // TODO: Update order status to paid in your database
+    // updateOrderStatus(external_reference, 'paid', gateway_reference);
+  } else {
+    // TODO: Update order status to failed in your database
+    // updateOrderStatus(external_reference, 'failed');
+  }
+
+  // Always respond with 200 OK
+  return res.status(200).json({ success: true, message: 'Callback received' });
+});
+
+app.listen(3000, () => console.log('Web App running on port 3000'));
+```
 
 ---
-
-## Code Examples
 
 ### PHP (Laravel)
 
@@ -180,114 +299,120 @@ namespace App\Http\Controllers;
 use App\Models\Order;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 
 class PaymentController extends Controller
 {
-    private string $processorUrl = 'https://payment-processor.kahingaarnold2.workers.dev';
+    private string $processorUrl;
 
-    public function checkout(Order $order)
+    public function __construct()
     {
-        $response = Http::post($this->processorUrl . '/api/v1/payments/initiate', [
+        $this->processorUrl = config('services.payment_processor.url', 'https://payment-processor.kahingaarnold2.workers.dev');
+    }
+
+    // 1. Initiate Payment
+    public function checkout(Request $request, Order $order)
+    {
+        $response = Http::post("{$this->processorUrl}/api/v1/payments/initiate", [
             'amount'             => $order->total_amount,
-            'phone'              => $order->customer_phone,
-            'external_reference' => $order->id,
+            'phone'              => $request->input('phone'),
+            'external_reference' => (string) $order->id,
             'name'               => $order->customer_name,
             'email'              => $order->customer_email,
-            'remarks'            => 'Order #' . $order->id,
+            'remarks'            => "Order #{$order->id}"
         ]);
 
         $result = $response->json();
 
         if ($response->successful() && !empty($result['success'])) {
-            return view('checkout.waiting', [
-                'order' => $order,
-                'phone' => $order->customer_phone
+            return response()->json([
+                'success' => true,
+                'message' => 'Payment initiated. Enter PIN on your phone.',
+                'order_id' => $order->id
             ]);
         }
 
-        return back()->with('error', $result['message'] ?? 'Could not initiate payment.');
+        return response()->json([
+            'success' => false,
+            'message' => $result['message'] ?? 'Could not initiate payment'
+        ], 400);
     }
 
-    public function recheckStatus(string $orderId)
+    // 2. Check Status
+    public function checkStatus(string $orderId)
     {
-        $response = Http::get($this->processorUrl . "/api/v1/payments/status/{$orderId}");
+        $response = Http::get("{$this->processorUrl}/api/v1/payments/status/{$orderId}");
         $result = $response->json();
 
-        if (!empty($result['success'])) {
-            $order = Order::find($orderId);
-            if ($order && $result['status'] === 'success') {
-                $order->update(['status' => 'paid']);
-                return back()->with('success', 'Payment confirmed.');
-            } elseif ($order && $result['status'] === 'failed') {
-                $order->update(['status' => 'failed']);
-                return back()->with('error', 'Payment failed.');
-            }
+        if (!empty($result['success']) && $result['status'] === 'success') {
+            Order::where('id', $orderId)->update(['status' => 'paid']);
         }
 
-        return back()->with('info', 'Payment is pending.');
+        return response()->json($result);
     }
 
+    // 3. Webhook Callback Handler
     public function handleWebhook(Request $request)
     {
-        $order = Order::find($request->input('external_reference'));
-        if ($order) {
-            $status = $request->input('status') === 'success' ? 'paid' : 'failed';
-            $order->update(['status' => $status]);
+        $externalReference = $request->input('external_reference');
+        $status = $request->input('status');
+
+        Log::info("Payment Webhook received for Order {$externalReference}: {$status}");
+
+        $order = Order::find($externalReference);
+        if ($order && $order->status !== 'paid') {
+            $newStatus = ($status === 'success') ? 'paid' : 'failed';
+            $order->update(['status' => $newStatus]);
         }
 
-        return response()->json(['status' => 'ok']);
+        return response()->json(['success' => true], 200);
     }
 }
 ```
 
 ---
 
-### Node.js (Express & Axios)
+### Python (FastAPI)
 
-```javascript
-const express = require('express');
-const axios = require('axios');
-const app = express();
-app.use(express.json());
+```python
+from fastapi import FastAPI, HTTPException, Request
+import httpx
+import os
 
-const PROCESSOR_URL = 'https://payment-processor.kahingaarnold2.workers.dev';
+app = FastAPI()
+PROCESSOR_URL = os.getenv("PAYMENT_PROCESSOR_URL", "https://payment-processor.kahingaarnold2.workers.dev")
 
-app.post('/checkout', async (req, res) => {
-  const { amount, phone, orderId, name, email } = req.body;
+@app.post("/api/checkout")
+async def initiate_payment(payload: dict):
+    async with httpx.AsyncClient() as client:
+        res = await client.post(f"{PROCESSOR_URL}/api/v1/payments/initiate", json={
+            "amount": payload.get("amount"),
+            "phone": payload.get("phone"),
+            "external_reference": payload.get("order_id"),
+            "name": payload.get("name"),
+            "email": payload.get("email")
+        })
+        
+        data = res.json()
+        if res.status_code == 200 and data.get("success"):
+            return {"success": True, "message": "Payment initiated successfully."}
+        raise HTTPException(status_code=400, detail=data.get("message"))
 
-  try {
-    const { data } = await axios.post(`${PROCESSOR_URL}/api/v1/payments/initiate`, {
-      amount,
-      phone,
-      external_reference: orderId,
-      name,
-      email
-    });
+@app.get("/api/payment-status/{order_id}")
+async def get_payment_status(order_id: str):
+    async with httpx.AsyncClient() as client:
+        res = await client.get(f"{PROCESSOR_URL}/api/v1/payments/status/{order_id}")
+        return res.json()
 
-    if (data.success) {
-      return res.json({ success: true, message: 'Payment initiated successfully.' });
-    }
-    return res.status(400).json({ success: false, error: data.message });
-  } catch (err) {
-    return res.status(500).json({ success: false, error: err.response?.data?.message || 'Server error' });
-  }
-});
-
-app.get('/recheck-status/:orderId', async (req, res) => {
-  try {
-    const { data } = await axios.get(`${PROCESSOR_URL}/api/v1/payments/status/${req.params.orderId}`);
-    return res.json(data);
-  } catch (err) {
-    return res.status(400).json({ success: false, message: 'Status check failed' });
-  }
-});
-
-app.post('/api/v1/payments/callback', (req, res) => {
-  const { external_reference, status } = req.body;
-  console.log(`Order ${external_reference} status update: ${status}`);
-
-  return res.status(200).send('OK');
-});
+@app.post("/api/v1/payments/callback")
+async def payment_webhook(request: Request):
+    payload = await request.json()
+    order_id = payload.get("external_reference")
+    status = payload.get("status")
+    print(f"Webhook received for Order {order_id}: {status}")
+    
+    # Update order in DB
+    return {"status": "ok"}
 ```
 
 ---
@@ -295,15 +420,42 @@ app.post('/api/v1/payments/callback', (req, res) => {
 ### cURL Examples
 
 ```bash
-# 1. Initiate payment
+# 1. Initiate Payment
 curl -X POST https://payment-processor.kahingaarnold2.workers.dev/api/v1/payments/initiate \
   -H "Content-Type: application/json" \
   -d '{
     "amount": 15000,
     "phone": "0712345678",
-    "external_reference": "INV-2026-881"
+    "external_reference": "INV-2026-881",
+    "name": "Jane Doe",
+    "remarks": "Order #INV-2026-881"
   }'
 
-# 2. Check payment status
+# 2. Check Payment Status
 curl -X GET https://payment-processor.kahingaarnold2.workers.dev/api/v1/payments/status/INV-2026-881
+
+# 3. Fetch Request & Traffic Logs (Inspector API)
+curl -X GET https://payment-processor.kahingaarnold2.workers.dev/api/v1/requests
 ```
+
+---
+
+## 5. Testing & Debugging Tools
+
+### 1. Interactive Sandbox Emulator
+To test payments without deducting real money:
+- Configure the processor to Sandbox Mode:
+  ```bash
+  curl -X POST https://payment-processor.kahingaarnold2.workers.dev/api/emulator/configure-sandbox
+  ```
+- Open the **Sandbox Terminal & Emulator UI**:
+  `https://payment-processor.kahingaarnold2.workers.dev/emulator`
+
+### 2. Request & Traffic Inspector
+Every HTTP request and response processed by the middleware is logged with execution duration, status code, request body, and response body.
+- **Web UI**: Open `https://payment-processor.kahingaarnold2.workers.dev/` and click the **Request Inspector** tab.
+- **Inspector API**: Query logs programmatically at `GET /api/v1/requests`.
+
+### 3. Postman Collection Testing
+- Set Postman environment variable `base_url` to `https://payment-processor.kahingaarnold2.workers.dev`.
+- Send requests to `/api/v1/payments/initiate`, `/api/v1/payments/status/:external_reference`, and `/api/v1/requests`.
