@@ -7,6 +7,84 @@ export class DbClient {
     this.db = db;
   }
 
+  static tablesEnsured = false;
+
+  async ensureTablesExist() {
+    if (DbClient.tablesEnsured) return;
+    try {
+      await this.db.batch([
+        this.db.prepare(`
+          CREATE TABLE IF NOT EXISTS configs (
+              key TEXT PRIMARY KEY,
+              value TEXT,
+              created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+          )
+        `),
+        this.db.prepare(`
+          CREATE TABLE IF NOT EXISTS payment_logs (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              external_reference TEXT NOT NULL,
+              gateway_reference TEXT,
+              gateway TEXT NOT NULL,
+              amount REAL NOT NULL,
+              phone TEXT NOT NULL,
+              status TEXT DEFAULT 'pending',
+              raw_request TEXT,
+              raw_response TEXT,
+              callback_payload TEXT,
+              created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+          )
+        `),
+        this.db.prepare(`
+          CREATE TABLE IF NOT EXISTS request_logs (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              request_id TEXT NOT NULL,
+              direction TEXT NOT NULL DEFAULT 'INBOUND',
+              method TEXT NOT NULL,
+              path TEXT NOT NULL,
+              status_code INTEGER,
+              headers TEXT,
+              request_body TEXT,
+              response_body TEXT,
+              ip_address TEXT,
+              duration_ms INTEGER,
+              external_reference TEXT,
+              gateway TEXT,
+              created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+          )
+        `),
+        this.db.prepare(`
+          CREATE TABLE IF NOT EXISTS emulator_transactions (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              gateway TEXT NOT NULL,
+              external_id TEXT NOT NULL,
+              amount REAL NOT NULL,
+              phone TEXT NOT NULL,
+              buyer_name TEXT,
+              buyer_email TEXT,
+              status TEXT DEFAULT 'pending',
+              raw_payload TEXT,
+              created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+          )
+        `),
+        this.db.prepare(`CREATE INDEX IF NOT EXISTS idx_payment_logs_ext_ref ON payment_logs(external_reference)`),
+        this.db.prepare(`CREATE INDEX IF NOT EXISTS idx_payment_logs_gateway ON payment_logs(gateway)`),
+        this.db.prepare(`CREATE INDEX IF NOT EXISTS idx_payment_logs_status ON payment_logs(status)`),
+        this.db.prepare(`CREATE INDEX IF NOT EXISTS idx_req_logs_req_id ON request_logs(request_id)`),
+        this.db.prepare(`CREATE INDEX IF NOT EXISTS idx_req_logs_dir ON request_logs(direction)`),
+        this.db.prepare(`CREATE INDEX IF NOT EXISTS idx_req_logs_ext_ref ON request_logs(external_reference)`),
+        this.db.prepare(`CREATE INDEX IF NOT EXISTS idx_req_logs_created ON request_logs(created_at)`),
+        this.db.prepare(`CREATE INDEX IF NOT EXISTS idx_emulator_txns_ext_id ON emulator_transactions(external_id)`)
+      ]);
+      DbClient.tablesEnsured = true;
+    } catch (e) {
+      console.error('Error auto-creating schema tables:', e);
+    }
+  }
+
   // --- CONFIG HELPER METHODS ---
 
   async getConfig(key, defaultValue = '') {
@@ -17,6 +95,19 @@ export class DbClient {
         .first();
       return row ? (row.value ?? defaultValue) : defaultValue;
     } catch (e) {
+      if (e && e.message && e.message.toLowerCase().includes('no such table')) {
+        await this.ensureTablesExist();
+        try {
+          const row = await this.db
+            .prepare('SELECT value FROM configs WHERE key = ?')
+            .bind(key)
+            .first();
+          return row ? (row.value ?? defaultValue) : defaultValue;
+        } catch (err2) {
+          console.error(`Error getting config ${key} after retry:`, err2);
+          return defaultValue;
+        }
+      }
       console.error(`Error getting config ${key}:`, e);
       return defaultValue;
     }
@@ -24,14 +115,27 @@ export class DbClient {
 
   async setConfig(key, value) {
     const now = new Date().toISOString();
-    await this.db
-      .prepare(
-        `INSERT INTO configs (key, value, created_at, updated_at)
-         VALUES (?, ?, ?, ?)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
-      )
-      .bind(key, value, now, now)
-      .run();
+    const runInsert = async () => {
+      await this.db
+        .prepare(
+          `INSERT INTO configs (key, value, created_at, updated_at)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+        )
+        .bind(key, value, now, now)
+        .run();
+    };
+
+    try {
+      await runInsert();
+    } catch (e) {
+      if (e && e.message && e.message.toLowerCase().includes('no such table')) {
+        await this.ensureTablesExist();
+        await runInsert();
+      } else {
+        throw e;
+      }
+    }
   }
 
   async getGatewayConfig(gateway, key, targetEnv = null) {
@@ -374,7 +478,7 @@ export class DbClient {
     const now = new Date().toISOString();
     const requestId = logData.request_id || `req_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
     
-    try {
+    const runInsert = async () => {
       const res = await this.db
         .prepare(
           `INSERT INTO request_logs 
@@ -398,13 +502,38 @@ export class DbClient {
         )
         .run();
       return res.meta?.last_row_id || null;
+    };
+
+    try {
+      return await runInsert();
     } catch (e) {
+      if (e && e.message && e.message.toLowerCase().includes('no such table')) {
+        await this.ensureTablesExist();
+        try {
+          return await runInsert();
+        } catch (err2) {
+          console.error('Error creating request log after retry:', err2);
+          return null;
+        }
+      }
       console.error('Error creating request log:', e);
       return null;
     }
   }
 
   async getRequestLogs({ search = '', direction = '', status = '', method = '', page = 1, perPage = 15 }) {
+    try {
+      return await this._fetchRequestLogs({ search, direction, status, method, page, perPage });
+    } catch (e) {
+      if (e && e.message && e.message.toLowerCase().includes('no such table')) {
+        await this.ensureTablesExist();
+        return await this._fetchRequestLogs({ search, direction, status, method, page, perPage });
+      }
+      throw e;
+    }
+  }
+
+  async _fetchRequestLogs({ search = '', direction = '', status = '', method = '', page = 1, perPage = 15 }) {
     let whereClauses = [];
     let params = [];
 
