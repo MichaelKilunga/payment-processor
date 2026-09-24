@@ -53,7 +53,6 @@ The Payment Processor is a standalone middleware service built on **Cloudflare W
 |---|---|---|
 | **Production** | `https://payment-processor.kahingaarnold2.workers.dev` | `https://payment-processor.kahingaarnold2.workers.dev/` |
 | **Sandbox / Emulator** | `https://payment-processor.kahingaarnold2.workers.dev` | `https://payment-processor.kahingaarnold2.workers.dev/emulator` |
-| **Local Development** | `http://localhost:8787` | `http://localhost:8787/` |
 
 ### Web Application Environment Variables
 
@@ -63,8 +62,8 @@ Add the following configuration variables to your web application's `.env` file:
 # Payment Processor Base URL
 PAYMENT_PROCESSOR_URL=https://payment-processor.kahingaarnold2.workers.dev
 
-# Web App Public Webhook Endpoint (Where payment notifications will be received)
-WEBAPP_CALLBACK_URL=https://yourwebapp.com/api/v1/payments/callback
+# Web App Public Webhook Endpoint (Where payment notifications will be received) - ensure this is available i your web app
+WEBAPP_CALLBACK_URL=https://duka.now/api/v1/payments/callback
 ```
 
 ---
@@ -75,7 +74,7 @@ WEBAPP_CALLBACK_URL=https://yourwebapp.com/api/v1/payments/callback
 
 ### Step 1: Initiate a Payment
 
-When a customer checks out, your web application backend sends a `POST` request to initiate payment.
+When a customer subscribe, your web application backend sends a `POST` request to initiate payment.
 
 #### Endpoint
 
@@ -106,7 +105,7 @@ Accept: application/json
   "external_reference": "INV-2026-881",
   "name": "Jane Doe",
   "email": "jane@example.com",
-  "remarks": "Order #INV-2026-881"
+  "remarks": "Subscription #INV-2026-881"
 }
 ```
 
