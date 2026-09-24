@@ -22,6 +22,23 @@ CREATE TABLE IF NOT EXISTS payment_logs (
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS request_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id TEXT NOT NULL,
+    direction TEXT NOT NULL DEFAULT 'INBOUND', -- 'INBOUND' (Web App -> Processor) or 'OUTBOUND' (Processor -> Gateway/WebApp)
+    method TEXT NOT NULL,
+    path TEXT NOT NULL,
+    status_code INTEGER,
+    headers TEXT,
+    request_body TEXT,
+    response_body TEXT,
+    ip_address TEXT,
+    duration_ms INTEGER,
+    external_reference TEXT,
+    gateway TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS emulator_transactions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     gateway TEXT NOT NULL,
@@ -39,4 +56,10 @@ CREATE TABLE IF NOT EXISTS emulator_transactions (
 CREATE INDEX IF NOT EXISTS idx_payment_logs_ext_ref ON payment_logs(external_reference);
 CREATE INDEX IF NOT EXISTS idx_payment_logs_gateway ON payment_logs(gateway);
 CREATE INDEX IF NOT EXISTS idx_payment_logs_status ON payment_logs(status);
+
+CREATE INDEX IF NOT EXISTS idx_req_logs_req_id ON request_logs(request_id);
+CREATE INDEX IF NOT EXISTS idx_req_logs_dir ON request_logs(direction);
+CREATE INDEX IF NOT EXISTS idx_req_logs_ext_ref ON request_logs(external_reference);
+CREATE INDEX IF NOT EXISTS idx_req_logs_created ON request_logs(created_at);
+
 CREATE INDEX IF NOT EXISTS idx_emulator_txns_ext_id ON emulator_transactions(external_id);

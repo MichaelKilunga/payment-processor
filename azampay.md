@@ -108,18 +108,33 @@ When the customer completes the payment, your webhook endpoint will receive a **
 
 ## 4. Querying/Fetching Status (Polling)
 
-If you need to fetch or verify the current status of a payment directly (e.g. if the webhook is delayed or if you want to poll status from the frontend), you can query the status endpoint.
+If your web app needs to fetch or verify the current status of a payment directly (e.g. if the webhook callback is delayed or when polling status from the frontend waiting screen), send a status check request.
 
-### API Endpoint
+### Automatic AzamPay Live Query Fallback
+
+When a status check request is received:
+1. The processor first inspects its local database.
+2. **If the status is not yet updated (`pending`)**, the processor automatically queries **AzamPay's API** directly using your credentials.
+3. If AzamPay returns an updated status (`success` or `failed`), the processor automatically updates its database, forwards the callback to your Web App webhook URL, and returns the updated feedback payload immediately!
+
+### API Endpoints
 
 ```http
-GET https://ludicrous-unsorted-balance.ngrok-free.dev/api/v1/payments/status/{external_reference}
-Accept: application/json
+GET /api/v1/payments/status/{external_reference}
+POST /api/v1/payments/check-status
+Content-Type: application/json
+```
+
+#### POST Body Example
+```json
+{
+  "external_reference": "INV-2026-881"
+}
 ```
 
 ### Response Format
 
-#### 1. Payment Succeeded
+#### 1. Payment Succeeded (Confirmed via AzamPay Query)
 
 ```json
 {
@@ -129,13 +144,15 @@ Accept: application/json
   "amount": 15000.00,
   "gateway": "azampay",
   "gateway_reference": "AZ-89109312",
+  "checked_remote": true,
+  "remote_detail": "Payment confirmed successfully via AzamPay status query",
   "message": "Payment completed successfully",
-  "created_at": "2026-07-21T17:43:00+03:00",
-  "updated_at": "2026-07-21T17:45:00+03:00"
+  "created_at": "2026-09-24T18:00:00.000Z",
+  "updated_at": "2026-09-24T18:00:05.000Z"
 }
 ```
 
-#### 2. Payment Pending (Awaiting Customer Action)
+#### 2. Payment Pending (Awaiting Customer Wallet PIN)
 
 ```json
 {
@@ -145,13 +162,15 @@ Accept: application/json
   "amount": 15000.00,
   "gateway": "azampay",
   "gateway_reference": "AZ-89109312",
+  "checked_remote": true,
+  "remote_detail": "Payment is still pending on AzamPay gateway",
   "message": "Payment is pending",
-  "created_at": "2026-07-21T17:43:00+03:00",
-  "updated_at": "2026-07-21T17:43:00+03:00"
+  "created_at": "2026-09-24T18:00:00.000Z",
+  "updated_at": "2026-09-24T18:00:00.000Z"
 }
 ```
 
-#### 3. Payment Failed
+#### 3. Payment Failed / Declined
 
 ```json
 {
@@ -161,9 +180,11 @@ Accept: application/json
   "amount": 15000.00,
   "gateway": "azampay",
   "gateway_reference": "AZ-89109312",
+  "checked_remote": true,
+  "remote_detail": "Payment failed or declined according to AzamPay status query",
   "message": "Payment failed",
-  "created_at": "2026-07-21T17:43:00+03:00",
-  "updated_at": "2026-07-21T17:44:12+03:00"
+  "created_at": "2026-09-24T18:00:00.000Z",
+  "updated_at": "2026-09-24T18:01:10.000Z"
 }
 ```
 
@@ -172,9 +193,20 @@ Accept: application/json
 ```json
 {
   "success": false,
-  "message": "Payment log not found"
+  "message": "Payment log not found",
+  "external_reference": "INV-2026-881"
 }
 ```
+
+---
+
+## 5. Live Request & Response Inspector (Traffic Monitor)
+
+The Payment Processor records **every single request & response** coming from your web app as well as every outgoing request leaving the processor (calls to AzamPay APIs & webapp callbacks).
+
+* View incoming & outgoing HTTP traffic in real time via the **Control Panel → Request Inspector** tab.
+* Inspect full request headers, raw JSON bodies, status codes, and latency in milliseconds.
+* Programmatically fetch request traffic via `GET /api/v1/requests`.
 
 ---
 

@@ -1,25 +1,27 @@
 import crypto from 'node:crypto';
+import { logOutboundRequest } from '../utils/outboundLogger.js';
 
 export class SelcomGateway {
   getName() {
     return 'selcom';
   }
 
-  async initiatePayment(dbClient, params, originUrl = '') {
-    const rawBaseUrl = await dbClient.getConfig('selcom_base_url');
+  async initiatePayment(dbClient, params, originUrl = '', targetEnv = null) {
+    const envMode = targetEnv || params.environment || null;
+    const rawBaseUrl = await dbClient.getGatewayConfig('selcom', 'base_url', envMode);
     if (!rawBaseUrl) {
       return {
         success: false,
         error:
-          'Selcom Base URL is not configured. If testing in Sandbox, please click "⚡ Switch Gateway URLs to Sandbox Emulator" on the Sandbox page to set sandbox endpoints.',
+          'Selcom Base URL is not configured. Please check your Selcom configuration panel.',
         raw_response: { selcom_base_url: rawBaseUrl },
       };
     }
 
     const baseUrl = rawBaseUrl.replace(/\/+$/, '');
-    const apiKey = await dbClient.getConfig('selcom_api_key');
-    const apiSecret = await dbClient.getConfig('selcom_secret_key');
-    const vendor = await dbClient.getConfig('selcom_vendor');
+    const apiKey = await dbClient.getGatewayConfig('selcom', 'api_key', envMode);
+    const apiSecret = await dbClient.getGatewayConfig('selcom', 'secret_key', envMode);
+    const vendor = await dbClient.getGatewayConfig('selcom', 'vendor', envMode);
     const webappCallbackUrl = await dbClient.getConfig('webapp_callback_url');
 
     const orderId = params.external_reference || `SEL-${Date.now()}`;
@@ -46,6 +48,7 @@ export class SelcomGateway {
     };
 
     const headers = this.computeHeaders(orderMinArray, apiKey, apiSecret);
+    const start = Date.now();
 
     try {
       const response = await fetch(`${baseUrl}/checkout/create-order-minimal`, {
@@ -61,6 +64,18 @@ export class SelcomGateway {
       } catch (e) {
         responseBody = null;
       }
+
+      await logOutboundRequest(dbClient, {
+        method: 'POST',
+        url: `${baseUrl}/checkout/create-order-minimal`,
+        headers,
+        requestBody: orderMinArray,
+        responseStatus: response.status,
+        responseBody: responseBody || rawText,
+        durationMs: Date.now() - start,
+        externalReference: orderId,
+        gateway: 'selcom',
+      });
 
       if (
         response.ok &&
@@ -100,6 +115,81 @@ export class SelcomGateway {
     }
   }
 
+  async checkTransactionStatus(dbClient, externalReference, gatewayReference = null, targetEnv = null) {
+    const rawBaseUrl = await dbClient.getGatewayConfig('selcom', 'base_url', targetEnv);
+    if (!rawBaseUrl) {
+      return {
+        success: false,
+        status: 'pending',
+        error: 'Selcom Base URL is not configured.',
+      };
+    }
+
+    const baseUrl = rawBaseUrl.replace(/\/+$/, '');
+    const apiKey = await dbClient.getGatewayConfig('selcom', 'api_key', targetEnv);
+    const apiSecret = await dbClient.getGatewayConfig('selcom', 'secret_key', targetEnv);
+
+    const statusArray = {
+      order_id: externalReference,
+    };
+    const headers = this.computeHeaders(statusArray, apiKey, apiSecret);
+    const start = Date.now();
+
+    try {
+      const response = await fetch(`${baseUrl}/checkout/order-status`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(statusArray),
+      });
+
+      const rawText = await response.text().catch(() => '');
+      let responseBody = null;
+      try { responseBody = JSON.parse(rawText); } catch (e) {}
+
+      await logOutboundRequest(dbClient, {
+        method: 'POST',
+        url: `${baseUrl}/checkout/order-status`,
+        headers,
+        requestBody: statusArray,
+        responseStatus: response.status,
+        responseBody: responseBody || rawText,
+        durationMs: Date.now() - start,
+        externalReference,
+        gateway: 'selcom',
+      });
+
+      const data = responseBody?.data?.[0] || {};
+      const result = String(responseBody?.result || data.result || '').toLowerCase();
+      const resultCode = String(data.resultcode || responseBody?.resultcode || '');
+
+      let status = 'pending';
+      if (result === 'success' || resultCode === '000' || data.payment_status === 'COMPLETED') {
+        status = 'success';
+      } else if (result === 'fail' || result === 'failed' || (resultCode && resultCode !== '000')) {
+        status = 'failed';
+      }
+
+      return {
+        success: true,
+        status,
+        gateway_reference: data.reference || gatewayReference,
+        raw_response: responseBody || { status: response.status, body: rawText },
+        message: status === 'success'
+          ? 'Payment confirmed successfully via Selcom status query'
+          : status === 'failed'
+          ? 'Payment failed or declined according to Selcom status query'
+          : 'Payment is still pending on Selcom gateway',
+      };
+    } catch (e) {
+      console.error('Error querying Selcom status:', e);
+      return {
+        success: false,
+        status: 'pending',
+        error: `Selcom status query failed: ${e.message}`,
+      };
+    }
+  }
+
   async verifyWebhookSignature(dbClient, headers, requestData) {
     const digestHeader = headers.get('digest');
     const timestamp = headers.get('timestamp');
@@ -109,7 +199,7 @@ export class SelcomGateway {
       return false;
     }
 
-    const apiSecret = await dbClient.getConfig('selcom_secret_key');
+    const apiSecret = await dbClient.getGatewayConfig('selcom', 'secret_key');
     if (!apiSecret) return false;
 
     const fields = signedFields.split(',');

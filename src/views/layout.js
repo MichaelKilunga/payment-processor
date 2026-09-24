@@ -1,4 +1,17 @@
-export function renderLayout({ title, activeTab, content, flashMessage }) {
+export function renderLayout(opts = {}, legacyContent = null, legacyFlash = null) {
+  let title, activeTab, content, flashMessage;
+  if (typeof opts === 'string') {
+    title = opts;
+    content = legacyContent || '';
+    flashMessage = legacyFlash || null;
+    activeTab = 'config';
+  } else {
+    title = opts.title || 'Payment Processor';
+    activeTab = opts.activeTab || 'config';
+    content = opts.content || '';
+    flashMessage = opts.flashMessage || null;
+  }
+
   const flashHtml = flashMessage
     ? `
     <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-4">
@@ -19,28 +32,30 @@ export function renderLayout({ title, activeTab, content, flashMessage }) {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>${title} - Payment Processor</title>
   <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <style>[x-cloak] { display: none !important; }</style>
 </head>
-<body class="h-full font-sans antialiased text-gray-800 flex flex-col min-h-screen bg-white">
+<body class="h-full font-sans antialiased text-gray-800 flex flex-col min-h-screen bg-gray-50">
   
-  <header class="bg-white border-b border-gray-200">
+  <header class="bg-white border-b border-gray-200 shadow-sm">
     <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
       <div class="flex items-center justify-between h-16">
         <div class="flex items-center space-x-3">
-          <div class="w-8 h-8 rounded bg-indigo-600 flex items-center justify-center text-white font-bold text-sm">
+          <div class="w-8 h-8 rounded bg-indigo-600 flex items-center justify-center text-white font-bold text-sm shadow">
             PP
           </div>
-          <span class="font-semibold text-lg text-gray-900">Payment Processor Middleware</span>
+          <span class="font-bold text-lg text-gray-900">Payment Processor Middleware</span>
         </div>
         <nav class="flex space-x-4">
-          <a href="/" class="px-3 py-2 text-sm font-medium rounded-md transition ${
+          <a href="/" class="px-3.5 py-2 text-sm font-medium rounded-md transition ${
             activeTab === 'config'
-              ? 'bg-gray-100 text-gray-900 font-semibold'
+              ? 'bg-indigo-50 text-indigo-700 font-semibold border border-indigo-100'
               : 'text-gray-600 hover:text-gray-900 hover:bg-gray-50'
-          }">Configurations &amp; Logs</a>
-          <a href="/emulator" class="px-3 py-2 text-sm font-medium rounded-md transition ${
+          }">Configurations &amp; Gateway Panels</a>
+          <a href="/emulator" class="px-3.5 py-2 text-sm font-medium rounded-md transition ${
             activeTab === 'emulator'
-              ? 'bg-gray-100 text-gray-900 font-semibold'
+              ? 'bg-indigo-50 text-indigo-700 font-semibold border border-indigo-100'
               : 'text-gray-600 hover:text-gray-900 hover:bg-gray-50'
           }">Emulator Sandbox</a>
         </nav>
@@ -50,7 +65,7 @@ export function renderLayout({ title, activeTab, content, flashMessage }) {
 
   ${flashHtml}
 
-  <main class="flex-1 py-6 bg-white">
+  <main class="flex-1 py-6">
     <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
       ${content}
     </div>

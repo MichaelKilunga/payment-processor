@@ -18,30 +18,38 @@ emulatorApiRoutes.post('/configure-sandbox', async (c) => {
   const dbClient = new DbClient(c.env.DB);
   const origin = new URL(c.req.url).origin;
 
+  await dbClient.setConfig('environment_mode', 'sandbox');
+
+  await dbClient.setConfig('sandbox_selcom_base_url', `${origin}/api/emulator/selcom`);
+  await dbClient.setConfig('sandbox_azampay_base_url', `${origin}/api/emulator/azampay`);
+  await dbClient.setConfig('sandbox_azampay_auth_base_url', `${origin}/api/emulator/azampay`);
+
+  // Default sandbox credentials if empty
+  if (!(await dbClient.getConfig('sandbox_selcom_api_key'))) {
+    await dbClient.setConfig('sandbox_selcom_api_key', 'emulator_api_key');
+    await dbClient.setConfig('sandbox_selcom_secret_key', 'emulator_secret');
+    await dbClient.setConfig('sandbox_selcom_vendor', 'EMU_TILL_123');
+  }
+
+  if (!(await dbClient.getConfig('sandbox_azampay_client_id'))) {
+    await dbClient.setConfig('sandbox_azampay_client_id', 'emulator_client_id');
+    await dbClient.setConfig('sandbox_azampay_client_secret', 'emulator_secret');
+    await dbClient.setConfig('sandbox_azampay_app_name', 'EmulatorApp');
+    await dbClient.setConfig('sandbox_azampay_api_key', 'emulator_api_key');
+  }
+
+  // Also legacy fallbacks
   await dbClient.setConfig('selcom_base_url', `${origin}/api/emulator/selcom`);
   await dbClient.setConfig('azampay_base_url', `${origin}/api/emulator/azampay`);
   await dbClient.setConfig('azampay_auth_base_url', `${origin}/api/emulator/azampay`);
 
-  // Default sandbox credentials if empty
-  if (!(await dbClient.getConfig('selcom_api_key'))) {
-    await dbClient.setConfig('selcom_api_key', 'emulator_api_key');
-    await dbClient.setConfig('selcom_secret_key', 'emulator_secret');
-    await dbClient.setConfig('selcom_vendor', 'EMU_TILL_123');
-  }
-
-  if (!(await dbClient.getConfig('azampay_client_id'))) {
-    await dbClient.setConfig('azampay_client_id', 'emulator_client_id');
-    await dbClient.setConfig('azampay_client_secret', 'emulator_secret');
-    await dbClient.setConfig('azampay_app_name', 'EmulatorApp');
-    await dbClient.setConfig('azampay_api_key', 'emulator_api_key');
-  }
-
   return c.json({
     success: true,
-    message: 'Processor successfully configured to point to Sandbox Emulator endpoints!',
-    selcom_base_url: `${origin}/api/emulator/selcom`,
-    azampay_base_url: `${origin}/api/emulator/azampay`,
-    azampay_auth_base_url: `${origin}/api/emulator/azampay`,
+    message: 'Processor successfully configured to point to Sandbox Emulator endpoints! Live credentials remain untouched.',
+    environment_mode: 'sandbox',
+    sandbox_selcom_base_url: `${origin}/api/emulator/selcom`,
+    sandbox_azampay_base_url: `${origin}/api/emulator/azampay`,
+    sandbox_azampay_auth_base_url: `${origin}/api/emulator/azampay`,
   });
 });
 
@@ -92,6 +100,46 @@ emulatorApiRoutes.post('/azampay/azampay/mno/checkout', async (c) => {
   });
 });
 
+// Fake AzamPay Status Query Endpoint
+const handleAzamPayStatusQuery = async (c) => {
+  const dbClient = new DbClient(c.env.DB);
+  let externalId = c.req.query('externalId') || c.req.query('utilityref') || c.req.query('farmId');
+  if (!externalId) {
+    try {
+      const b = await c.req.json();
+      externalId = b.externalId || b.utilityref || b.farmId;
+    } catch (e) {}
+  }
+
+  if (!externalId) {
+    return c.json({ success: false, message: 'externalId parameter is required' }, 400);
+  }
+
+  const txn = await dbClient.findEmulatorTxnByExtId(externalId, 'azampay');
+  if (!txn) {
+    return c.json({ success: false, message: 'Transaction not found in emulator' }, 404);
+  }
+
+  const rawStatus = txn.status === 'approved' ? 'SUCCESS' : txn.status === 'rejected' || txn.status === 'timeout' ? 'FAILED' : 'PENDING';
+
+  return c.json({
+    success: true,
+    statusCode: "200",
+    message: `Transaction status is ${rawStatus}`,
+    data: {
+      status: rawStatus,
+      externalId: txn.external_id,
+      utilityref: txn.external_id,
+      transactionId: 'EMTXN-' + txn.external_id,
+      amount: txn.amount,
+      msisdn: txn.phone,
+    },
+  });
+};
+
+emulatorApiRoutes.get('/azampay/azampay/mno/checkout/status', handleAzamPayStatusQuery);
+emulatorApiRoutes.post('/azampay/azampay/mno/checkout/status', handleAzamPayStatusQuery);
+
 // Fake Selcom Create Order Minimal
 emulatorApiRoutes.post('/selcom/checkout/create-order-minimal', async (c) => {
   const dbClient = new DbClient(c.env.DB);
@@ -132,6 +180,35 @@ emulatorApiRoutes.post('/selcom/checkout/create-order-minimal', async (c) => {
         payment_gateway_url: encodedUrl,
       },
     ],
+  });
+});
+
+// Fake Selcom Order Status Endpoint
+emulatorApiRoutes.post('/selcom/checkout/order-status', async (c) => {
+  const dbClient = new DbClient(c.env.DB);
+  let body = {};
+  try { body = await c.req.json(); } catch (e) {}
+  const orderId = body.order_id;
+  
+  if (!orderId) return c.json({ result: 'FAIL', message: 'order_id is required' }, 400);
+
+  const txn = await dbClient.findEmulatorTxnByExtId(orderId, 'selcom');
+  if (!txn) return c.json({ result: 'FAIL', message: 'Order not found' }, 404);
+
+  const isSuccess = txn.status === 'approved';
+  const isFailed = txn.status === 'rejected' || txn.status === 'timeout';
+
+  return c.json({
+    result: isSuccess ? 'SUCCESS' : isFailed ? 'FAIL' : 'PENDING',
+    resultcode: isSuccess ? '000' : isFailed ? '999' : '001',
+    message: `Order is ${txn.status}`,
+    data: [
+      {
+        order_id: txn.external_id,
+        reference: 'EMSEL-' + txn.external_id,
+        payment_status: isSuccess ? 'COMPLETED' : isFailed ? 'FAILED' : 'PENDING',
+      }
+    ]
   });
 });
 

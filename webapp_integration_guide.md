@@ -118,13 +118,27 @@ In the Payment Processor **Admin Control Panel** (`https://payment-processor.kah
 
 ## 3. Manual Status Check & Fallbacks
 
-If a webhook callback is missed due to network downtime, your backend can query transaction status directly.
+If a webhook callback is delayed or when polling status from your web app frontend, your backend can query transaction status directly.
 
-### Status Endpoint
+### Automatic Live Gateway Query Fallback
+
+When a status check request is received by the processor:
+- If the transaction status is **not yet updated (`pending`)**, the processor automatically queries **AzamPay** (or Selcom) directly.
+- If AzamPay confirms the payment is `success` or `failed`, the processor automatically updates its database, posts the callback to your WebApp callback URL, and returns the updated feedback payload immediately!
+
+### Status Check Endpoints
 
 ```http
 GET https://payment-processor.kahingaarnold2.workers.dev/api/v1/payments/status/{external_reference}
-Accept: application/json
+POST https://payment-processor.kahingaarnold2.workers.dev/api/v1/payments/check-status
+Content-Type: application/json
+```
+
+#### Request Payload (POST)
+```json
+{
+  "external_reference": "INV-2026-881"
+}
 ```
 
 ### Response Example
@@ -137,11 +151,22 @@ Accept: application/json
   "amount": 15000.00,
   "gateway": "azampay",
   "gateway_reference": "REF-89109312",
+  "checked_remote": true,
+  "remote_detail": "Payment confirmed successfully via AzamPay status query",
   "message": "Payment completed successfully",
-  "created_at": "2026-09-23T01:30:00.000Z",
-  "updated_at": "2026-09-23T01:30:05.000Z"
+  "created_at": "2026-09-24T18:00:00.000Z",
+  "updated_at": "2026-09-24T18:00:05.000Z"
 }
 ```
+
+---
+
+## 4. Full Request Logging & Traffic Inspector
+
+Every request received from your web app and every request sent to gateway providers or web app callbacks is logged with full details (headers, payload, status code, latency).
+
+- **View Live Traffic**: Open Control Panel → **Request Inspector** tab.
+- **Fetch Logs via API**: `GET /api/v1/requests`
 
 ---
 

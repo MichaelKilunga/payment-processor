@@ -26,16 +26,20 @@ webRoutes.get('/', async (c) => {
 // POST /config/save
 webRoutes.post('/config/save', async (c) => {
   const dbClient = new DbClient(c.env.DB);
-  const body = await c.req.parseBody();
+  let body = {};
+  const isJsonReq = c.req.header('accept')?.includes('json') || c.req.header('content-type')?.includes('json');
 
-  // Test Gateway Connection button clicked?
-  if (body.test_gateway) {
-    return handleConnectionTest(c, dbClient, body.test_gateway, body);
+  if (isJsonReq) {
+    try { body = await c.req.json(); } catch (e) { body = await c.req.parseBody(); }
+  } else {
+    body = await c.req.parseBody();
   }
 
   const keys = [
+    'environment_mode',
     'active_gateway',
     'webapp_callback_url',
+    // Legacy
     'selcom_base_url',
     'selcom_api_key',
     'selcom_secret_key',
@@ -46,6 +50,28 @@ webRoutes.post('/config/save', async (c) => {
     'azampay_client_secret',
     'azampay_app_name',
     'azampay_api_key',
+    // Live
+    'live_selcom_base_url',
+    'live_selcom_api_key',
+    'live_selcom_secret_key',
+    'live_selcom_vendor',
+    'live_azampay_base_url',
+    'live_azampay_auth_base_url',
+    'live_azampay_client_id',
+    'live_azampay_client_secret',
+    'live_azampay_app_name',
+    'live_azampay_api_key',
+    // Sandbox
+    'sandbox_selcom_base_url',
+    'sandbox_selcom_api_key',
+    'sandbox_selcom_secret_key',
+    'sandbox_selcom_vendor',
+    'sandbox_azampay_base_url',
+    'sandbox_azampay_auth_base_url',
+    'sandbox_azampay_client_id',
+    'sandbox_azampay_client_secret',
+    'sandbox_azampay_app_name',
+    'sandbox_azampay_api_key',
   ];
 
   for (const k of keys) {
@@ -54,30 +80,58 @@ webRoutes.post('/config/save', async (c) => {
     }
   }
 
+  // Test Gateway Connection button clicked?
+  if (body.test_gateway) {
+    return handleConnectionTest(c, dbClient, body.test_gateway, body);
+  }
+
   const configs = await dbClient.getAllConfigs();
+
+  if (isJsonReq) {
+    return c.json({
+      success: true,
+      message: 'Configurations saved successfully! Live and Sandbox credentials updated independently.',
+      configs,
+    });
+  }
+
   const logsData = await dbClient.getPaymentLogs({ page: 1, perPage: 10 });
-  const flash = { type: 'success', text: 'Configurations saved successfully!' };
+  const flash = { type: 'success', text: 'Configurations saved successfully! Live and Sandbox credentials updated independently.' };
 
   return c.html(renderConfigView(configs, logsData, flash));
 });
 
 // Helper: Gateway connection test handler
 async function handleConnectionTest(c, dbClient, gatewayToTest, formData) {
-  if (gatewayToTest === 'selcom') {
-    const baseUrl = (formData.selcom_base_url || '').replace(/\/+$/, '');
-    const apiKey = formData.selcom_api_key || '';
-    const secretKey = formData.selcom_secret_key || '';
-    const vendor = formData.selcom_vendor || 'TILL123';
+  const isJsonReq = c.req.header('accept')?.includes('json') || c.req.header('content-type')?.includes('json');
+  const isSelcom = gatewayToTest.includes('selcom');
+  const isAzam = gatewayToTest.includes('azampay');
+  const isLive = gatewayToTest.startsWith('live_');
+  const envLabel = isLive ? 'Live Production' : 'Sandbox / Testing';
+
+  const returnResult = async (success, message) => {
+    if (isJsonReq) {
+      return c.json({ success, message, type: success ? 'success' : 'error' });
+    }
+    const configs = await dbClient.getAllConfigs();
+    const logsData = await dbClient.getPaymentLogs({ page: 1, perPage: 10 });
+    return c.html(
+      renderConfigView(configs, logsData, {
+        type: success ? 'success' : 'error',
+        text: message,
+      })
+    );
+  };
+
+  if (isSelcom) {
+    const prefix = isLive ? 'live_selcom_' : gatewayToTest.startsWith('sandbox_') ? 'sandbox_selcom_' : 'selcom_';
+    const baseUrl = (formData[`${prefix}base_url`] || formData.selcom_base_url || '').replace(/\/+$/, '');
+    const apiKey = formData[`${prefix}api_key`] || formData.selcom_api_key || '';
+    const secretKey = formData[`${prefix}secret_key`] || formData.selcom_secret_key || '';
+    const vendor = formData[`${prefix}vendor`] || formData.selcom_vendor || 'TILL123';
 
     if (!baseUrl || !apiKey || !secretKey) {
-      const configs = await dbClient.getAllConfigs();
-      const logsData = await dbClient.getPaymentLogs({ page: 1, perPage: 10 });
-      return c.html(
-        renderConfigView(configs, logsData, {
-          type: 'error',
-          text: 'Selcom Base URL, API Key, and Secret Key are required to run the connection test.',
-        })
-      );
+      return returnResult(false, `Selcom ${envLabel} Base URL, API Key, and Secret Key are required to run the connection test.`);
     }
 
     try {
@@ -92,103 +146,55 @@ async function handleConnectionTest(c, dbClient, gatewayToTest, formData) {
       });
 
       const resJson = await res.json().catch(() => null);
-      const configs = await dbClient.getAllConfigs();
-      const logsData = await dbClient.getPaymentLogs({ page: 1, perPage: 10 });
 
       if (res.status === 401 || res.status === 403) {
-        return c.html(
-          renderConfigView(configs, logsData, {
-            type: 'error',
-            text: `Connection successful, but credentials were rejected by Selcom (HTTP ${res.status}).`,
-          })
-        );
+        return returnResult(false, `Connection successful, but ${envLabel} credentials were rejected by Selcom (HTTP ${res.status}).`);
       }
 
       const msg = resJson?.message || `Status Code ${res.status}`;
-      return c.html(
-        renderConfigView(configs, logsData, {
-          type: 'success',
-          text: `Selcom API contacted successfully! Gateway responded: ${msg}`,
-        })
-      );
+      return returnResult(true, `Selcom (${envLabel}) API contacted successfully! Gateway responded: ${msg}`);
     } catch (e) {
-      const configs = await dbClient.getAllConfigs();
-      const logsData = await dbClient.getPaymentLogs({ page: 1, perPage: 10 });
-      return c.html(
-        renderConfigView(configs, logsData, {
-          type: 'error',
-          text: `Network connection to Selcom failed: ${e.message}`,
-        })
-      );
+      return returnResult(false, `Network connection to Selcom (${envLabel}) failed: ${e.message}`);
     }
   }
 
-  if (gatewayToTest === 'azampay') {
-    const authBaseUrl = (formData.azampay_auth_base_url || '').trim().replace(/\/+$/, '');
-    const clientId = (formData.azampay_client_id || '').trim();
-    const clientSecret = (formData.azampay_client_secret || '').trim();
-    const appName = (formData.azampay_app_name || '').trim();
+  if (isAzam) {
+    const prefix = isLive ? 'live_azampay_' : gatewayToTest.startsWith('sandbox_') ? 'sandbox_azampay_' : 'azampay_';
+    const authBaseUrl = (formData[`${prefix}auth_base_url`] || formData.azampay_auth_base_url || '')
+      .trim()
+      .replace(/\/+$/, '')
+      .replace(/\/AppRegistration\/GenerateToken\/?$/i, '');
+    const clientId = (formData[`${prefix}client_id`] || formData.azampay_client_id || '').trim();
+    const clientSecret = (formData[`${prefix}client_secret`] || formData.azampay_client_secret || '').trim();
+    const appName = (formData[`${prefix}app_name`] || formData.azampay_app_name || '').trim();
 
-    if (!authBaseUrl || !clientId || !clientSecret) {
-      const configs = await dbClient.getAllConfigs();
-      const logsData = await dbClient.getPaymentLogs({ page: 1, perPage: 10 });
-      return c.html(
-        renderConfigView(configs, logsData, {
-          type: 'error',
-          text: 'AzamPay Auth URL, Client ID, and Client Secret are required to run the test.',
-        })
-      );
+    if (!authBaseUrl || !clientId || !clientSecret || !appName) {
+      return returnResult(false, `AzamPay (${envLabel}) Auth URL, App Name, Client ID, and Client Secret are required.`);
     }
 
     try {
       const res = await fetch(`${authBaseUrl}/AppRegistration/GenerateToken`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
         body: JSON.stringify({ appName, clientId, clientSecret }),
       });
 
       const json = await res.json().catch(() => null);
       const token =
         json?.token || json?.data?.accessToken || json?.data?.token || json?.accessToken;
-      const configs = await dbClient.getAllConfigs();
-      const logsData = await dbClient.getPaymentLogs({ page: 1, perPage: 10 });
 
       if (res.ok && (token || json?.success === true)) {
-        return c.html(
-          renderConfigView(configs, logsData, {
-            type: 'success',
-            text: 'AzamPay connection test successful! Access token generated successfully.',
-          })
-        );
+        return returnResult(true, `AzamPay (${envLabel}) connection test successful! Access token generated successfully.`);
       }
 
-      const err = json?.message || `Authentication failed (HTTP ${res.status})`;
-      return c.html(
-        renderConfigView(configs, logsData, {
-          type: 'error',
-          text: `AzamPay authentication endpoint reached, but token generation failed: ${err}`,
-        })
-      );
+      const errDetail = json?.message || (res.status === 401 ? `Authentication failed (HTTP 401). Verify credentials in ${envLabel} panel.` : `Authentication failed (HTTP ${res.status})`);
+      return returnResult(false, `AzamPay (${envLabel}) auth endpoint reached, but token generation failed: ${errDetail}`);
     } catch (e) {
-      const configs = await dbClient.getAllConfigs();
-      const logsData = await dbClient.getPaymentLogs({ page: 1, perPage: 10 });
-      return c.html(
-        renderConfigView(configs, logsData, {
-          type: 'error',
-          text: `Network connection to AzamPay failed: ${e.message}`,
-        })
-      );
+      return returnResult(false, `Network connection to AzamPay (${envLabel}) failed: ${e.message}`);
     }
   }
 
-  const configs = await dbClient.getAllConfigs();
-  const logsData = await dbClient.getPaymentLogs({ page: 1, perPage: 10 });
-  return c.html(
-    renderConfigView(configs, logsData, {
-      type: 'error',
-      text: 'Unsupported gateway test requested.',
-    })
-  );
+  return returnResult(false, 'Unsupported gateway test requested.');
 }
 
 // Log Management Endpoints
@@ -366,6 +372,129 @@ webRoutes.get('/logs/export', async (c) => {
   return c.text(csvContent, 200, {
     'Content-Type': 'text/csv',
     'Content-Disposition': `attachment; filename="transaction_logs_${filenameDate}.csv"`,
+  });
+});
+
+// Request Log Management Endpoints (Everything Coming & Leaving)
+webRoutes.get('/requests', async (c) => {
+  const dbClient = new DbClient(c.env.DB);
+  const search = c.req.query('search') || '';
+  const direction = c.req.query('direction') || '';
+  const status = c.req.query('status') || '';
+  const method = c.req.query('method') || '';
+  const page = parseInt(c.req.query('page') || '1', 10);
+  const perPage = parseInt(c.req.query('per_page') || '15', 10);
+
+  const logs = await dbClient.getRequestLogs({ search, direction, status, method, page, perPage });
+  return c.json(logs);
+});
+
+webRoutes.get('/requests/:id', async (c) => {
+  const dbClient = new DbClient(c.env.DB);
+  const id = parseInt(c.req.param('id'), 10);
+  const log = await dbClient.findRequestLogById(id);
+  if (!log) return c.json({ error: 'Request log not found' }, 404);
+  return c.json(log);
+});
+
+webRoutes.delete('/requests/:id', async (c) => {
+  const dbClient = new DbClient(c.env.DB);
+  const id = parseInt(c.req.param('id'), 10);
+  await dbClient.deleteRequestLog(id);
+  return c.json({ success: true, message: 'Request log deleted successfully.' });
+});
+
+webRoutes.post('/requests/bulk-delete', async (c) => {
+  const dbClient = new DbClient(c.env.DB);
+  const body = await c.req.json().catch(() => ({}));
+  const count = await dbClient.bulkDeleteRequestLogs({ type: body.type, ids: body.ids });
+  return c.json({ success: true, count, message: `${count} request log(s) deleted successfully.` });
+});
+
+// Interactive Status Check Route for Admin UI
+webRoutes.post('/check-status-interactive', async (c) => {
+  const dbClient = new DbClient(c.env.DB);
+  const body = await c.req.json().catch(() => ({}));
+  const ref = body.external_reference;
+
+  if (!ref) {
+    return c.json({ success: false, message: 'external_reference is required.' }, 400);
+  }
+
+  const traceSteps = [];
+
+  // Step 1: Query Local DB
+  traceSteps.push({ step: 1, name: 'Database Lookup', detail: `Querying payment_logs for external_reference: "${ref}"` });
+  let log = await dbClient.findPaymentLogByRef(ref);
+
+  if (!log) {
+    traceSteps.push({ step: 2, name: 'Lookup Failed', detail: 'No payment record found with this reference in local DB.' });
+    return c.json({
+      success: false,
+      message: 'Payment log not found',
+      external_reference: ref,
+      trace: traceSteps,
+    });
+  }
+
+  traceSteps.push({
+    step: 2,
+    name: 'DB Record Found',
+    detail: `Gateway: ${log.gateway.toUpperCase()}, Current DB Status: ${log.status.toUpperCase()}, Amount: TZS ${log.amount}`,
+  });
+
+  if (log.status !== 'pending') {
+    traceSteps.push({
+      step: 3,
+      name: 'Status Already Finalized',
+      detail: `Payment is already finalized as "${log.status}". No external gateway poll required.`,
+    });
+    return c.json({
+      success: true,
+      external_reference: log.external_reference,
+      status: log.status,
+      amount: log.amount,
+      gateway: log.gateway,
+      gateway_reference: log.gateway_reference,
+      checked_remote: false,
+      message: log.status === 'success' ? 'Payment completed successfully' : 'Payment failed',
+      trace: traceSteps,
+    });
+  }
+
+  // Step 3: Check Remote Gateway (AzamPay / Selcom)
+  traceSteps.push({
+    step: 3,
+    name: 'Initiating Direct Gateway Status Check',
+    detail: `Status is PENDING. Contacting ${log.gateway.toUpperCase()} API to verify live payment status...`,
+  });
+
+  const { performStatusCheck } = await import('./api.js');
+  const statusRes = await performStatusCheck(dbClient, ref);
+
+  if (statusRes.payload.checked_remote) {
+    traceSteps.push({
+      step: 4,
+      name: 'Gateway Response Received',
+      detail: `Remote gateway check completed. Updated Status: ${statusRes.payload.status.toUpperCase()}. Detail: ${statusRes.payload.remote_detail || 'N/A'}`,
+    });
+  } else {
+    traceSteps.push({
+      step: 4,
+      name: 'Gateway Check Skipped',
+      detail: 'Gateway driver did not execute remote status query.',
+    });
+  }
+
+  traceSteps.push({
+    step: 5,
+    name: 'Final Response Ready',
+    detail: `Returning status update to Web Application. Final status: ${statusRes.payload.status.toUpperCase()}`,
+  });
+
+  return c.json({
+    ...statusRes.payload,
+    trace: traceSteps,
   });
 });
 

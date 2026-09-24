@@ -34,10 +34,24 @@ export class DbClient {
       .run();
   }
 
+  async getGatewayConfig(gateway, key, targetEnv = null) {
+    const env = targetEnv || (await this.getConfig('environment_mode', 'sandbox'));
+    const envKey = `${env}_${gateway}_${key}`;
+    const envVal = await this.getConfig(envKey);
+    if (envVal !== null && envVal !== undefined && envVal !== '') {
+      return envVal;
+    }
+    // Fallback to legacy non-prefixed key e.g. 'azampay_base_url'
+    const fallbackKey = `${gateway}_${key}`;
+    return await this.getConfig(fallbackKey, '');
+  }
+
   async getAllConfigs() {
     const keys = [
+      'environment_mode',
       'active_gateway',
       'webapp_callback_url',
+      // Legacy keys
       'selcom_base_url',
       'selcom_api_key',
       'selcom_secret_key',
@@ -48,6 +62,28 @@ export class DbClient {
       'azampay_client_secret',
       'azampay_app_name',
       'azampay_api_key',
+      // Live Keys
+      'live_selcom_base_url',
+      'live_selcom_api_key',
+      'live_selcom_secret_key',
+      'live_selcom_vendor',
+      'live_azampay_base_url',
+      'live_azampay_auth_base_url',
+      'live_azampay_client_id',
+      'live_azampay_client_secret',
+      'live_azampay_app_name',
+      'live_azampay_api_key',
+      // Sandbox Keys
+      'sandbox_selcom_base_url',
+      'sandbox_selcom_api_key',
+      'sandbox_selcom_secret_key',
+      'sandbox_selcom_vendor',
+      'sandbox_azampay_base_url',
+      'sandbox_azampay_auth_base_url',
+      'sandbox_azampay_client_id',
+      'sandbox_azampay_client_secret',
+      'sandbox_azampay_app_name',
+      'sandbox_azampay_api_key',
     ];
 
     const result = await this.db.prepare('SELECT key, value FROM configs').all();
@@ -330,5 +366,169 @@ export class DbClient {
       .prepare('UPDATE emulator_transactions SET status = ?, updated_at = ? WHERE id = ?')
       .bind(updateData.status, now, id)
       .run();
+  }
+
+  // --- HTTP REQUEST / RESPONSE LOG HELPER METHODS ---
+
+  async createRequestLog(logData) {
+    const now = new Date().toISOString();
+    const requestId = logData.request_id || `req_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    
+    try {
+      const res = await this.db
+        .prepare(
+          `INSERT INTO request_logs 
+           (request_id, direction, method, path, status_code, headers, request_body, response_body, ip_address, duration_ms, external_reference, gateway, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .bind(
+          requestId,
+          logData.direction || 'INBOUND',
+          logData.method || 'GET',
+          logData.path || '/',
+          logData.status_code || null,
+          logData.headers ? (typeof logData.headers === 'string' ? logData.headers : JSON.stringify(logData.headers)) : null,
+          logData.request_body ? (typeof logData.request_body === 'string' ? logData.request_body : JSON.stringify(logData.request_body)) : null,
+          logData.response_body ? (typeof logData.response_body === 'string' ? logData.response_body : JSON.stringify(logData.response_body)) : null,
+          logData.ip_address || null,
+          logData.duration_ms || 0,
+          logData.external_reference || null,
+          logData.gateway || null,
+          now
+        )
+        .run();
+      return res.meta?.last_row_id || null;
+    } catch (e) {
+      console.error('Error creating request log:', e);
+      return null;
+    }
+  }
+
+  async getRequestLogs({ search = '', direction = '', status = '', method = '', page = 1, perPage = 15 }) {
+    let whereClauses = [];
+    let params = [];
+
+    if (search) {
+      whereClauses.push('(path LIKE ? OR external_reference LIKE ? OR request_body LIKE ? OR response_body LIKE ? OR request_id LIKE ?)');
+      const term = `%${search}%`;
+      params.push(term, term, term, term, term);
+    }
+
+    if (direction && direction !== 'all') {
+      whereClauses.push('direction = ?');
+      params.push(direction.toUpperCase());
+    }
+
+    if (method && method !== 'all') {
+      whereClauses.push('method = ?');
+      params.push(method.toUpperCase());
+    }
+
+    if (status && status !== 'all') {
+      if (status === '2xx') {
+        whereClauses.push('status_code >= 200 AND status_code < 300');
+      } else if (status === '4xx') {
+        whereClauses.push('status_code >= 400 AND status_code < 500');
+      } else if (status === '5xx') {
+        whereClauses.push('status_code >= 500');
+      } else if (!isNaN(status)) {
+        whereClauses.push('status_code = ?');
+        params.push(parseInt(status, 10));
+      }
+    }
+
+    const whereSql = whereClauses.length > 0 ? 'WHERE ' + whereClauses.join(' AND ') : '';
+
+    // Count query
+    const countRow = await this.db
+      .prepare(`SELECT COUNT(*) as total FROM request_logs ${whereSql}`)
+      .bind(...params)
+      .first();
+
+    const total = countRow ? countRow.total : 0;
+    const lastPage = Math.max(1, Math.ceil(total / perPage));
+    const offset = (page - 1) * perPage;
+
+    // Data query
+    const dataSql = `SELECT * FROM request_logs ${whereSql} ORDER BY id DESC LIMIT ? OFFSET ?`;
+    const dataResult = await this.db
+      .prepare(dataSql)
+      .bind(...params, perPage, offset)
+      .all();
+
+    const data = (dataResult.results || []).map((row) => this.parseRequestLogItem(row));
+
+    return {
+      current_page: page,
+      data,
+      first_page_url: `?page=1`,
+      from: total > 0 ? offset + 1 : null,
+      last_page: lastPage,
+      last_page_url: `?page=${lastPage}`,
+      next_page_url: page < lastPage ? `?page=${page + 1}` : null,
+      prev_page_url: page > 1 ? `?page=${page - 1}` : null,
+      per_page: perPage,
+      to: total > 0 ? Math.min(offset + perPage, total) : null,
+      total,
+    };
+  }
+
+  async findRequestLogById(id) {
+    const row = await this.db
+      .prepare('SELECT * FROM request_logs WHERE id = ?')
+      .bind(id)
+      .first();
+    return this.parseRequestLogItem(row);
+  }
+
+  async deleteRequestLog(id) {
+    await this.db.prepare('DELETE FROM request_logs WHERE id = ?').bind(id).run();
+  }
+
+  async bulkDeleteRequestLogs({ type, ids = [] }) {
+    if (type === 'all') {
+      const res = await this.db.prepare('DELETE FROM request_logs').run();
+      return res.meta?.changes || 0;
+    } else {
+      if (!ids || ids.length === 0) return 0;
+      const placeholders = ids.map(() => '?').join(',');
+      const res = await this.db
+        .prepare(`DELETE FROM request_logs WHERE id IN (${placeholders})`)
+        .bind(...ids)
+        .run();
+      return res.meta?.changes || 0;
+    }
+  }
+
+  parseRequestLogItem(row) {
+    if (!row) return null;
+    let headersObj = null;
+    let reqBodyObj = null;
+    let resBodyObj = null;
+
+    try {
+      headersObj = row.headers ? JSON.parse(row.headers) : null;
+    } catch (e) {
+      headersObj = row.headers;
+    }
+
+    try {
+      reqBodyObj = row.request_body ? JSON.parse(row.request_body) : null;
+    } catch (e) {
+      reqBodyObj = row.request_body;
+    }
+
+    try {
+      resBodyObj = row.response_body ? JSON.parse(row.response_body) : null;
+    } catch (e) {
+      resBodyObj = row.response_body;
+    }
+
+    return {
+      ...row,
+      headers: headersObj,
+      request_body: reqBodyObj,
+      response_body: resBodyObj,
+    };
   }
 }

@@ -1,10 +1,14 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
+import { requestLoggerMiddleware } from './middleware/requestLogger.js';
 import { apiRoutes } from './routes/api.js';
 import { emulatorApiRoutes } from './routes/emulatorApi.js';
 import { webRoutes } from './routes/web.js';
 
 const app = new Hono();
+
+// Global HTTP Request Logger Middleware (captures all incoming requests & responses)
+app.use('*', requestLoggerMiddleware);
 
 // Enable CORS for API routes
 app.use('/api/*', cors());

@@ -1,9 +1,112 @@
 import { Hono } from 'hono';
 import { DbClient } from '../db/client.js';
 import { PaymentProcessorManager } from '../gateways/PaymentProcessorManager.js';
+import { logOutboundRequest } from '../utils/outboundLogger.js';
 
 export const apiRoutes = new Hono();
 const manager = new PaymentProcessorManager();
+
+/**
+ * Shared status check helper
+ */
+export async function performStatusCheck(dbClient, externalRef) {
+  let log = await dbClient.findPaymentLogByRef(externalRef);
+  if (!log) {
+    return {
+      statusCode: 404,
+      payload: { success: false, message: 'Payment log not found', external_reference: externalRef },
+    };
+  }
+
+  let checkedRemote = false;
+  let remoteCheckResult = null;
+
+  // If status is still pending, check live with the gateway (AzamPay / Selcom)
+  if (log.status === 'pending') {
+    try {
+      const gatewayObj = await manager.getGateway(dbClient, log.gateway);
+      if (gatewayObj && typeof gatewayObj.checkTransactionStatus === 'function') {
+        checkedRemote = true;
+        remoteCheckResult = await gatewayObj.checkTransactionStatus(dbClient, log.external_reference, log.gateway_reference);
+
+        if (remoteCheckResult && remoteCheckResult.success && remoteCheckResult.status !== 'pending') {
+          // Update DB record
+          await dbClient.updatePaymentLog(log.id, {
+            status: remoteCheckResult.status,
+            gateway_reference: remoteCheckResult.gateway_reference || log.gateway_reference,
+            raw_response: remoteCheckResult.raw_response || null,
+          });
+
+          // Re-fetch updated log
+          log = await dbClient.findPaymentLogById(log.id);
+
+          // Forward updated status callback to WebApp if webapp_callback_url is configured
+          const webappCallbackUrl = await dbClient.getConfig('webapp_callback_url');
+          if (webappCallbackUrl) {
+            const parsedCallback = {
+              external_reference: log.external_reference,
+              gateway: log.gateway,
+              gateway_reference: log.gateway_reference,
+              amount: log.amount,
+              status: log.status,
+              phone: log.phone,
+              message: `Status updated via direct gateway check: ${remoteCheckResult.message || log.status}`,
+              timestamp: new Date().toISOString(),
+            };
+
+            const cbStart = Date.now();
+            try {
+              const fwdRes = await fetch(webappCallbackUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(parsedCallback),
+              });
+              const fwdText = await fwdRes.text().catch(() => '');
+
+              await logOutboundRequest(dbClient, {
+                method: 'POST',
+                url: webappCallbackUrl,
+                headers: { 'Content-Type': 'application/json' },
+                requestBody: parsedCallback,
+                responseStatus: fwdRes.status,
+                responseBody: fwdText,
+                durationMs: Date.now() - cbStart,
+                externalReference: log.external_reference,
+                gateway: log.gateway,
+              });
+            } catch (e) {
+              console.error('Error forwarding callback to WebApp during status check:', e);
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.error(`Status check error for gateway ${log.gateway}:`, e);
+    }
+  }
+
+  return {
+    statusCode: 200,
+    payload: {
+      success: true,
+      external_reference: log.external_reference,
+      status: log.status,
+      amount: log.amount,
+      gateway: log.gateway,
+      gateway_reference: log.gateway_reference,
+      checked_remote: checkedRemote,
+      remote_detail: remoteCheckResult ? remoteCheckResult.message : null,
+      message:
+        log.status === 'success'
+          ? 'Payment completed successfully'
+          : log.status === 'failed'
+          ? 'Payment failed'
+          : 'Payment is pending',
+      created_at: log.created_at,
+      updated_at: log.updated_at,
+    },
+  };
+}
 
 // POST /api/v1/payments/initiate
 apiRoutes.post('/v1/payments/initiate', async (c) => {
@@ -59,6 +162,7 @@ apiRoutes.post('/v1/payments/initiate', async (c) => {
       external_reference,
       remarks,
       provider: body.provider,
+      environment: body.environment,
     },
     originUrl
   );
@@ -94,28 +198,21 @@ apiRoutes.post('/v1/payments/initiate', async (c) => {
 apiRoutes.get('/v1/payments/status/:external_reference', async (c) => {
   const dbClient = new DbClient(c.env.DB);
   const externalRef = c.req.param('external_reference');
+  const res = await performStatusCheck(dbClient, externalRef);
+  return c.json(res.payload, res.statusCode);
+});
 
-  const log = await dbClient.findPaymentLogByRef(externalRef);
-  if (!log) {
-    return c.json({ success: false, message: 'Payment log not found' }, 404);
+// POST /api/v1/payments/check-status
+apiRoutes.post('/v1/payments/check-status', async (c) => {
+  const dbClient = new DbClient(c.env.DB);
+  let body = {};
+  try { body = await c.req.json(); } catch (e) {}
+  const externalRef = body.external_reference || body.external_id || body.order_id;
+  if (!externalRef) {
+    return c.json({ success: false, message: 'external_reference field is required.' }, 400);
   }
-
-  return c.json({
-    success: true,
-    external_reference: log.external_reference,
-    status: log.status,
-    amount: log.amount,
-    gateway: log.gateway,
-    gateway_reference: log.gateway_reference,
-    message:
-      log.status === 'success'
-        ? 'Payment completed successfully'
-        : log.status === 'failed'
-        ? 'Payment failed'
-        : 'Payment is pending',
-    created_at: log.created_at,
-    updated_at: log.updated_at,
-  });
+  const res = await performStatusCheck(dbClient, externalRef);
+  return c.json(res.payload, res.statusCode);
 });
 
 // POST /api/v1/callbacks/:gateway
@@ -168,11 +265,25 @@ apiRoutes.post('/v1/callbacks/:gateway', async (c) => {
   // Forward callback to Web Application
   const webappCallbackUrl = await dbClient.getConfig('webapp_callback_url');
   if (webappCallbackUrl) {
+    const cbStart = Date.now();
     try {
       const fwdRes = await fetch(webappCallbackUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(parsed),
+      });
+      const fwdText = await fwdRes.text().catch(() => '');
+
+      await logOutboundRequest(dbClient, {
+        method: 'POST',
+        url: webappCallbackUrl,
+        headers: { 'Content-Type': 'application/json' },
+        requestBody: parsed,
+        responseStatus: fwdRes.status,
+        responseBody: fwdText,
+        durationMs: Date.now() - cbStart,
+        externalReference: parsed.external_reference,
+        gateway: gatewayName,
       });
 
       if (!fwdRes.ok) {
@@ -237,5 +348,19 @@ apiRoutes.get('/v1/logs', async (c) => {
   const perPage = parseInt(c.req.query('per_page') || '10', 10);
 
   const logs = await dbClient.getPaymentLogs({ search, gateway, status, page, perPage });
+  return c.json(logs);
+});
+
+// GET /api/v1/requests (For Request & Response Inspector)
+apiRoutes.get('/v1/requests', async (c) => {
+  const dbClient = new DbClient(c.env.DB);
+  const search = c.req.query('search') || '';
+  const direction = c.req.query('direction') || '';
+  const status = c.req.query('status') || '';
+  const method = c.req.query('method') || '';
+  const page = parseInt(c.req.query('page') || '1', 10);
+  const perPage = parseInt(c.req.query('per_page') || '20', 10);
+
+  const logs = await dbClient.getRequestLogs({ search, direction, status, method, page, perPage });
   return c.json(logs);
 });
