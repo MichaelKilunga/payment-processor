@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { hmacSha256, safeEqual, isTimestampFresh } from '../utils/security.js';
 import { logOutboundRequest } from '../utils/outboundLogger.js';
 
 export class SelcomGateway {
@@ -190,34 +191,44 @@ export class SelcomGateway {
     }
   }
 
-  async verifyWebhookSignature(dbClient, headers, requestData) {
+  /**
+   * Returns 'valid' | 'invalid' | 'unsigned'.
+   * Selcom signs `timestamp=<ts>&field=value...` over the fields listed in
+   * Signed-Fields. A missing signature or a stale timestamp yields 'unsigned'
+   * so the caller falls back to an authoritative order-status query.
+   */
+  async verifyWebhookSignature(dbClient, headers, rawBody, requestData = {}) {
     const digestHeader = headers.get('digest');
     const timestamp = headers.get('timestamp');
     const signedFields = headers.get('signed-fields');
 
     if (!digestHeader || !timestamp || !signedFields) {
-      return false;
+      return 'unsigned';
     }
 
     const apiSecret = await dbClient.getGatewayConfig('selcom', 'secret_key');
-    if (!apiSecret) return false;
+    if (!apiSecret) return 'unsigned';
 
-    const fields = signedFields.split(',');
+    const fields = signedFields.split(',').map((f) => f.trim()).filter(Boolean);
+    // The signed field set must cover the fields that drive our decision.
+    for (const r of ['order_id', 'result', 'resultcode', 'amount']) {
+      if (requestData[r] !== undefined && !fields.includes(r)) return 'invalid';
+    }
+
     let data = `timestamp=${timestamp}`;
-
     for (const field of fields) {
       if (requestData[field] === undefined) {
-        return false;
+        return 'invalid';
       }
       data += `&${field}=${String(requestData[field])}`;
     }
 
-    const computed = crypto
-      .createHmac('sha256', apiSecret)
-      .update(data)
-      .digest('base64');
+    const computed = await hmacSha256(apiSecret, data, 'base64');
+    if (!safeEqual(digestHeader, computed)) return 'invalid';
 
-    return digestHeader === computed;
+    // Replay protection: a correctly signed but old message is downgraded to unsigned.
+    if (!isTimestampFresh(timestamp, 15 * 60)) return 'unsigned';
+    return 'valid';
   }
 
   parseCallback(data) {

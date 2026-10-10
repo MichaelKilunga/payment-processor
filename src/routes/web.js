@@ -1,17 +1,145 @@
 import { Hono } from 'hono';
+import { getCookie } from 'hono/cookie';
 import { DbClient } from '../db/client.js';
 import { renderConfigView } from '../views/configView.js';
 import { renderEmulatorView } from '../views/emulatorView.js';
 import { renderSelcomPayView } from '../views/selcomPayView.js';
+import { renderLoginView } from '../views/loginView.js';
 import { PaymentProcessorManager } from '../gateways/PaymentProcessorManager.js';
+import {
+  dashboardAuthMiddleware,
+  getAdminCredentials,
+  verifyPassword,
+  updateAdminCredentials,
+  createSessionToken,
+  setDashboardSessionCookie,
+  clearDashboardSessionCookie,
+  SESSION_COOKIE_NAME,
+  verifySessionToken,
+  MIN_PASSWORD_LENGTH,
+} from '../utils/auth.js';
+import { rotateApiKey, revokeApiKeys, rotateWebhookSecret, CONFIG_KEYS } from '../utils/apiAuth.js';
+import { rateLimit, clientIp, validateWebhookUrl } from '../utils/security.js';
 
 export const webRoutes = new Hono();
 const manager = new PaymentProcessorManager();
+
+/**
+ * Only allow redirects to local paths (prevents open redirect after login).
+ */
+function safeRedirectPath(value) {
+  const v = String(value || '/');
+  if (!v.startsWith('/') || v.startsWith('//') || v.startsWith('/\\')) return '/';
+  return v;
+}
+
+/**
+ * Non-secret view of the web app integration credentials for the dashboard.
+ */
+async function getIntegrationSettings(dbClient, env = {}) {
+  return {
+    apiKeyPrefix: await dbClient.getConfig(CONFIG_KEYS.apiKeyPrefix, ''),
+    apiKeyCreatedAt: await dbClient.getConfig(CONFIG_KEYS.apiKeyCreatedAt, ''),
+    apiKeyFromEnv: !!env.WEBAPP_API_KEY,
+    previousKeyExpiresAt: await dbClient.getConfig(CONFIG_KEYS.previousApiKeyExpiresAt, ''),
+    webhookSecretPrefix: await dbClient.getConfig(CONFIG_KEYS.webhookSecretPrefix, ''),
+    webhookSecretCreatedAt: await dbClient.getConfig(CONFIG_KEYS.webhookSecretCreatedAt, ''),
+    webhookSecretFromEnv: !!env.WEBAPP_WEBHOOK_SECRET,
+    requireSignedRequests: (await dbClient.getConfig(CONFIG_KEYS.requireSignedRequests, '0')) === '1',
+    allowedOrigins: await dbClient.getConfig(CONFIG_KEYS.allowedOrigins, ''),
+  };
+}
+
+// Apply Authentication Middleware to all Dashboard Web Routes
+webRoutes.use('*', dashboardAuthMiddleware);
+
+// GET /login (Render Login Page)
+webRoutes.get('/login', async (c) => {
+  const redirect = safeRedirectPath(c.req.query('redirect'));
+  const dbClient = new DbClient(c.env.DB);
+  const creds = await getAdminCredentials(dbClient, c.env, c);
+  const token = getCookie(c, SESSION_COOKIE_NAME);
+
+  if (await verifySessionToken(token, creds)) {
+    return c.redirect(redirect, 302);
+  }
+
+  if (creds.loginDisabled) {
+    return c.html(
+      renderLoginView({
+        redirect,
+        error:
+          'Dashboard login is locked: no administrator password is configured. Set the ADMIN_PASSWORD Worker secret (wrangler secret put ADMIN_PASSWORD) and reload.',
+      }),
+      503
+    );
+  }
+
+  return c.html(renderLoginView({ redirect }));
+});
+
+// POST /login (Submit Login Credentials)
+webRoutes.post('/login', async (c) => {
+  const dbClient = new DbClient(c.env.DB);
+  const body = await c.req.parseBody();
+  const username = String(body.username || '').trim();
+  const password = String(body.password || '');
+  const redirect = safeRedirectPath(body.redirect);
+
+  const ip = clientIp(c);
+  const allowed = await rateLimit(c.env, { binding: 'LOGIN_RATE_LIMITER', key: `login:${ip}`, limit: 10, periodSec: 60 });
+  if (!allowed) {
+    return c.html(
+      renderLoginView({ error: 'Too many login attempts. Please wait a minute and try again.', redirect, username }),
+      429
+    );
+  }
+
+  let creds = await getAdminCredentials(dbClient, c.env, c);
+
+  if (creds.loginDisabled) {
+    return c.html(
+      renderLoginView({
+        error: 'Dashboard login is locked: no administrator password is configured. Set the ADMIN_PASSWORD Worker secret.',
+        redirect,
+      }),
+      503
+    );
+  }
+
+  if (username === creds.username && (await verifyPassword(password, creds))) {
+    // Transparently upgrade legacy SHA-256 hashes to PBKDF2 on successful login
+    if (creds.needsUpgrade) {
+      await updateAdminCredentials(dbClient, creds.username, password);
+      creds = await getAdminCredentials(dbClient, c.env, c);
+    }
+    const token = await createSessionToken(creds.username, creds);
+    setDashboardSessionCookie(c, token);
+    return c.redirect(redirect, 302);
+  }
+  console.warn(`[AUDIT] Failed dashboard login for "${username}" from ${ip}`);
+
+  return c.html(
+    renderLoginView({
+      error: 'Invalid admin username or password. Please try again.',
+      redirect,
+      username,
+    }),
+    401
+  );
+});
+
+// GET /logout (Clear Session & Redirect to Login)
+webRoutes.get('/logout', (c) => {
+  clearDashboardSessionCookie(c);
+  return c.redirect('/login?logout=1', 302);
+});
 
 // GET / (Admin Settings & Logs Dashboard)
 webRoutes.get('/', async (c) => {
   const dbClient = new DbClient(c.env.DB);
   const configs = await dbClient.getAllConfigs();
+  const adminCreds = await getAdminCredentials(dbClient, c.env, c);
 
   const search = c.req.query('search') || '';
   const gateway = c.req.query('gateway') || 'all';
@@ -19,8 +147,9 @@ webRoutes.get('/', async (c) => {
   const page = parseInt(c.req.query('page') || '1', 10);
 
   const logsData = await dbClient.getPaymentLogs({ search, gateway, status, page, perPage: 10 });
+  const integration = await getIntegrationSettings(dbClient, c.env);
 
-  return c.html(renderConfigView(configs, logsData, null, { search, gateway, status }));
+  return c.html(renderConfigView(configs, logsData, null, { search, gateway, status }, adminCreds, integration));
 });
 
 // POST /config/save
@@ -74,6 +203,19 @@ webRoutes.post('/config/save', async (c) => {
     'sandbox_azampay_api_key',
   ];
 
+  if (body.webapp_callback_url !== undefined) {
+    const check = validateWebhookUrl(body.webapp_callback_url);
+    if (!check.ok) {
+      if (isJsonReq) return c.json({ success: false, message: check.error }, 400);
+      const configs = await dbClient.getAllConfigs();
+      const logsData = await dbClient.getPaymentLogs({ page: 1, perPage: 10 });
+      const adminCreds = await getAdminCredentials(dbClient, c.env, c);
+      const integration = await getIntegrationSettings(dbClient, c.env);
+      return c.html(renderConfigView(configs, logsData, { type: 'error', text: check.error }, {}, adminCreds, integration), 400);
+    }
+    body.webapp_callback_url = check.url;
+  }
+
   for (const k of keys) {
     if (body[k] !== undefined) {
       await dbClient.setConfig(k, String(body[k]));
@@ -96,9 +238,139 @@ webRoutes.post('/config/save', async (c) => {
   }
 
   const logsData = await dbClient.getPaymentLogs({ page: 1, perPage: 10 });
+  const adminCreds = await getAdminCredentials(dbClient, c.env, c);
+  const integration = await getIntegrationSettings(dbClient, c.env);
   const flash = { type: 'success', text: 'Configurations saved successfully! Live and Sandbox credentials updated independently.' };
 
-  return c.html(renderConfigView(configs, logsData, flash));
+  return c.html(renderConfigView(configs, logsData, flash, {}, adminCreds, integration));
+});
+
+// POST /config/save-security
+webRoutes.post('/config/save-security', async (c) => {
+  const dbClient = new DbClient(c.env.DB);
+  const body = await c.req.json().catch(() => ({}));
+  const currentPassword = String(body.current_password || '');
+  const newUsername = String(body.admin_username || '').trim();
+  const newPassword = String(body.new_password || '');
+  const confirmPassword = String(body.confirm_password || '');
+
+  const creds = await getAdminCredentials(dbClient, c.env, c);
+
+  // Verify current password
+  if (!(await verifyPassword(currentPassword, creds))) {
+    return c.json({ success: false, message: 'Current password verification failed. Invalid password.' }, 400);
+  }
+
+  if (newPassword) {
+    if (newPassword !== confirmPassword) {
+      return c.json({ success: false, message: 'New password and confirmation password do not match.' }, 400);
+    }
+    if (newPassword.length < MIN_PASSWORD_LENGTH) {
+      return c.json({ success: false, message: `New password must be at least ${MIN_PASSWORD_LENGTH} characters long.` }, 400);
+    }
+    if (!/[A-Za-z]/.test(newPassword) || !/[0-9]/.test(newPassword)) {
+      return c.json({ success: false, message: 'New password must contain both letters and numbers.' }, 400);
+    }
+  }
+
+  const targetUsername = newUsername || creds.username;
+  const passwordToSet = newPassword || currentPassword;
+
+  await updateAdminCredentials(dbClient, targetUsername, passwordToSet);
+
+  // Re-issue session cookie with updated credentials
+  const updatedCreds = await getAdminCredentials(dbClient, c.env, c);
+  const newToken = await createSessionToken(updatedCreds.username, updatedCreds);
+  setDashboardSessionCookie(c, newToken);
+
+  return c.json({
+    success: true,
+    message: 'Admin security credentials updated successfully!',
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Web App Integration credentials (API key, webhook secret, CORS, signing policy)
+// Sensitive operations re-verify the admin password.
+// ---------------------------------------------------------------------------
+async function reauth(c, dbClient, body) {
+  const creds = await getAdminCredentials(dbClient, c.env, c);
+  const ok = await verifyPassword(String(body.current_password || ''), creds);
+  if (!ok) {
+    return c.json({ success: false, message: 'Current password verification failed. Invalid password.' }, 400);
+  }
+  return null;
+}
+
+webRoutes.post('/config/api-key/rotate', async (c) => {
+  const dbClient = new DbClient(c.env.DB);
+  const body = await c.req.json().catch(() => ({}));
+  const denied = await reauth(c, dbClient, body);
+  if (denied) return denied;
+
+  const result = await rotateApiKey(dbClient);
+  console.warn(`[AUDIT] Admin "${c.get('adminUser')}" rotated the web app API key from ${clientIp(c)}`);
+  return c.json({
+    success: true,
+    api_key: result.key,
+    prefix: result.prefix,
+    created_at: result.createdAt,
+    message: 'New API key generated. Copy it now; it will not be shown again. The previous key keeps working for 24 hours.',
+  });
+});
+
+webRoutes.post('/config/api-key/revoke', async (c) => {
+  const dbClient = new DbClient(c.env.DB);
+  const body = await c.req.json().catch(() => ({}));
+  const denied = await reauth(c, dbClient, body);
+  if (denied) return denied;
+
+  await revokeApiKeys(dbClient);
+  console.warn(`[AUDIT] Admin "${c.get('adminUser')}" revoked all web app API keys from ${clientIp(c)}`);
+  return c.json({ success: true, message: 'All dashboard-issued API keys revoked. The web app API is now locked until a new key is generated.' });
+});
+
+webRoutes.post('/config/webhook-secret/rotate', async (c) => {
+  const dbClient = new DbClient(c.env.DB);
+  const body = await c.req.json().catch(() => ({}));
+  const denied = await reauth(c, dbClient, body);
+  if (denied) return denied;
+
+  const result = await rotateWebhookSecret(dbClient);
+  console.warn(`[AUDIT] Admin "${c.get('adminUser')}" rotated the webhook signing secret from ${clientIp(c)}`);
+  return c.json({
+    success: true,
+    webhook_secret: result.secret,
+    prefix: result.prefix,
+    created_at: result.createdAt,
+    message: 'New webhook signing secret generated. Copy it into your web app now; it will not be shown again.',
+  });
+});
+
+webRoutes.post('/config/integration', async (c) => {
+  const dbClient = new DbClient(c.env.DB);
+  const body = await c.req.json().catch(() => ({}));
+
+  if (body.allowed_origins !== undefined) {
+    const origins = String(body.allowed_origins || '')
+      .split(/[,\s]+/)
+      .map((o) => o.trim().replace(/\/+$/, ''))
+      .filter(Boolean);
+    for (const o of origins) {
+      let parsed;
+      try { parsed = new URL(o); } catch (e) { parsed = null; }
+      if (!parsed || parsed.origin !== o || !['http:', 'https:'].includes(parsed.protocol)) {
+        return c.json({ success: false, message: `"${o}" is not a valid origin. Use the form https://app.example.com with no path.` }, 400);
+      }
+    }
+    await dbClient.setConfig(CONFIG_KEYS.allowedOrigins, origins.join(','));
+  }
+
+  if (body.require_signed_requests !== undefined) {
+    await dbClient.setConfig(CONFIG_KEYS.requireSignedRequests, body.require_signed_requests ? '1' : '0');
+  }
+
+  return c.json({ success: true, message: 'Integration settings saved.', integration: await getIntegrationSettings(dbClient, c.env) });
 });
 
 // Helper: Gateway connection test handler
@@ -115,11 +387,13 @@ async function handleConnectionTest(c, dbClient, gatewayToTest, formData) {
     }
     const configs = await dbClient.getAllConfigs();
     const logsData = await dbClient.getPaymentLogs({ page: 1, perPage: 10 });
+    const adminCreds = await getAdminCredentials(dbClient, c.env, c);
+    const integration = await getIntegrationSettings(dbClient, c.env);
     return c.html(
       renderConfigView(configs, logsData, {
         type: success ? 'success' : 'error',
         text: message,
-      })
+      }, {}, adminCreds, integration)
     );
   };
 
@@ -470,7 +744,7 @@ webRoutes.post('/check-status-interactive', async (c) => {
   });
 
   const { performStatusCheck } = await import('./api.js');
-  const statusRes = await performStatusCheck(dbClient, ref);
+  const statusRes = await performStatusCheck(dbClient, ref, c.env, c.executionCtx);
 
   if (statusRes.payload.checked_remote) {
     traceSteps.push({
@@ -500,7 +774,8 @@ webRoutes.post('/check-status-interactive', async (c) => {
 
 // Emulator Routes
 webRoutes.get('/emulator', (c) => {
-  return c.html(renderEmulatorView());
+  const adminUser = c.get('adminUser') || 'admin';
+  return c.html(renderEmulatorView(adminUser));
 });
 
 webRoutes.get('/emulator/selcom-pay/:orderId', async (c) => {

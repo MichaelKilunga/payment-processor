@@ -1,8 +1,26 @@
 import { Hono } from 'hono';
 import crypto from 'node:crypto';
 import { DbClient } from '../db/client.js';
+import { requireAdminSession, requireApiClient } from '../utils/apiAuth.js';
 
 export const emulatorApiRoutes = new Hono();
+
+// The emulator only operates while the processor is in SANDBOX mode. The one
+// exception is the admin-only "configure-sandbox" action used to switch into it.
+emulatorApiRoutes.use('*', async (c, next) => {
+  if (c.req.path.endsWith('/configure-sandbox')) return next();
+  const dbClient = new DbClient(c.env.DB);
+  const mode = await dbClient.getConfig('environment_mode', 'sandbox');
+  if (mode !== 'sandbox') {
+    return c.json({ success: false, message: 'Emulator endpoints are disabled while the processor is in LIVE mode.' }, 403);
+  }
+  return next();
+});
+
+// Administrative emulator actions require a dashboard session
+emulatorApiRoutes.use('/configure-sandbox', requireAdminSession);
+emulatorApiRoutes.use('/transactions', requireApiClient);
+emulatorApiRoutes.use('/resolve-by-reference', requireApiClient);
 
 function generateRandomString(length) {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
@@ -103,19 +121,24 @@ emulatorApiRoutes.post('/azampay/azampay/mno/checkout', async (c) => {
 // Fake AzamPay Status Query Endpoint
 const handleAzamPayStatusQuery = async (c) => {
   const dbClient = new DbClient(c.env.DB);
-  let externalId = c.req.query('externalId') || c.req.query('utilityref') || c.req.query('farmId');
-  if (!externalId) {
+  let idParam = c.req.query('transactionId') || c.req.query('referenceId') || c.req.query('externalId') || c.req.query('utilityref') || c.req.query('farmId');
+  if (!idParam) {
     try {
       const b = await c.req.json();
-      externalId = b.externalId || b.utilityref || b.farmId;
+      idParam = b.transactionId || b.referenceId || b.externalId || b.utilityref || b.farmId;
     } catch (e) {}
   }
 
-  if (!externalId) {
-    return c.json({ success: false, message: 'externalId parameter is required' }, 400);
+  if (!idParam) {
+    return c.json({ success: false, message: 'transactionId or externalId parameter is required' }, 400);
   }
 
-  const txn = await dbClient.findEmulatorTxnByExtId(externalId, 'azampay');
+  const cleanId = String(idParam).replace(/^EMTXN-/i, '');
+  let txn = await dbClient.findEmulatorTxnByExtId(cleanId, 'azampay');
+  if (!txn) {
+    txn = await dbClient.findEmulatorTxnByExtId(idParam, 'azampay');
+  }
+
   if (!txn) {
     return c.json({ success: false, message: 'Transaction not found in emulator' }, 404);
   }
@@ -219,6 +242,45 @@ emulatorApiRoutes.get('/transactions', async (c) => {
   return c.json(txns);
 });
 
+// POST /api/emulator/resolve-by-reference  { external_reference, action }
+// Lets an automated test suite force a sandbox success/failure webhook for an order it initiated.
+emulatorApiRoutes.post('/resolve-by-reference', async (c) => {
+  const dbClient = new DbClient(c.env.DB);
+  const body = await c.req.json().catch(() => ({}));
+  const ref = String(body.external_reference || '').trim();
+  const action = body.action;
+
+  if (!ref) {
+    return c.json({ success: false, message: 'external_reference is required' }, 400);
+  }
+  if (!['approve', 'reject', 'timeout'].includes(action)) {
+    return c.json({ success: false, message: 'Action must be approve, reject, or timeout' }, 400);
+  }
+
+  const transaction =
+    (await dbClient.findEmulatorTxnByExtId(ref, 'azampay')) || (await dbClient.findEmulatorTxnByExtId(ref, 'selcom'));
+  if (!transaction) {
+    return c.json({ success: false, message: 'No emulator transaction found for that external_reference' }, 404);
+  }
+  if (transaction.status !== 'pending') {
+    return c.json({ success: false, message: `Transaction already resolved as "${transaction.status}".` }, 422);
+  }
+
+  const resolvedStatus = { approve: 'approved', reject: 'rejected', timeout: 'timeout' }[action];
+  await dbClient.updateEmulatorTxn(transaction.id, { status: resolvedStatus });
+
+  const originUrl = new URL(c.req.url).origin;
+  await fireCallback(dbClient, transaction, resolvedStatus, originUrl);
+
+  return c.json({
+    success: true,
+    external_reference: ref,
+    gateway: transaction.gateway,
+    resolved_as: resolvedStatus,
+    message: 'Sandbox transaction resolved; the gateway callback and the signed webhook to your web app have been dispatched.',
+  });
+});
+
 // POST /api/emulator/resolve/:id (approve / reject / timeout)
 emulatorApiRoutes.post('/resolve/:id', async (c) => {
   const dbClient = new DbClient(c.env.DB);
@@ -278,7 +340,7 @@ async function fireCallback(dbClient, transaction, resolvedStatus, originUrl) {
           : 'Payment was declined by customer',
     };
 
-    const secret = (await dbClient.getConfig('azampay_client_secret')) || 'emulator_secret';
+    const secret = (await dbClient.getGatewayConfig('azampay', 'client_secret')) || 'emulator_secret';
     const rawBody = JSON.stringify(payload);
     const signature = crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
 
@@ -299,7 +361,7 @@ async function fireCallback(dbClient, transaction, resolvedStatus, originUrl) {
 
   if (gateway === 'selcom') {
     const timestamp = new Date().toISOString();
-    const secret = (await dbClient.getConfig('selcom_secret_key')) || 'emulator_secret';
+    const secret = (await dbClient.getGatewayConfig('selcom', 'secret_key')) || 'emulator_secret';
     const resultCode = resolvedStatus === 'approved' ? '000' : '999';
     const result = resolvedStatus === 'approved' ? 'success' : 'failure';
     const reference = 'EMSEL-' + generateRandomString(10).toUpperCase();

@@ -2,6 +2,8 @@
  * Helper to log outbound HTTP requests made by the processor to external services (AzamPay, Selcom, WebApp callbacks)
  */
 
+import { redactSensitive, redactBodyText } from './security.js';
+
 export async function logOutboundRequest(dbClient, {
   method = 'POST',
   url = '',
@@ -16,17 +18,12 @@ export async function logOutboundRequest(dbClient, {
   if (!dbClient) return;
 
   try {
-    // Sanitize sensitive headers before saving
-    const sanitizedHeaders = { ...headers };
-    if (sanitizedHeaders.Authorization) {
-      sanitizedHeaders.Authorization = sanitizedHeaders.Authorization.substring(0, 15) + '...[REDACTED]';
-    }
-    if (sanitizedHeaders['X-API-KEY']) {
-      sanitizedHeaders['X-API-KEY'] = '[REDACTED]';
-    }
-    if (sanitizedHeaders['x-api-key']) {
-      sanitizedHeaders['x-api-key'] = '[REDACTED]';
-    }
+    // Sanitize sensitive headers and bodies before saving (client secrets, tokens, digests)
+    const sanitizedHeaders = redactSensitive({ ...headers });
+    const sanitizedRequestBody =
+      typeof requestBody === 'string' ? redactBodyText(requestBody) : redactSensitive(requestBody);
+    const sanitizedResponseBody =
+      typeof responseBody === 'string' ? redactBodyText(responseBody) : redactSensitive(responseBody);
 
     const requestId = `out_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 
@@ -37,8 +34,8 @@ export async function logOutboundRequest(dbClient, {
       path: url,
       status_code: responseStatus,
       headers: sanitizedHeaders,
-      request_body: requestBody,
-      response_body: responseBody,
+      request_body: sanitizedRequestBody,
+      response_body: sanitizedResponseBody,
       ip_address: 'processor-egress',
       duration_ms: durationMs,
       external_reference: externalReference,

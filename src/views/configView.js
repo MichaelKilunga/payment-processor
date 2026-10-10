@@ -1,6 +1,20 @@
 import { renderLayout } from './layout.js';
 
-export function renderConfigView(configs, logsData, flashMessage = null, queryParams = {}) {
+export function renderConfigView(configs, logsData, flashMessage = null, queryParams = {}, adminCreds = {}, integration = {}) {
+  const esc = (v) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  const jsStr = (v) => JSON.stringify(String(v ?? ''));
+  const hasApiKey = !!(integration.apiKeyPrefix || integration.apiKeyFromEnv);
+  const apiKeyLabel = integration.apiKeyPrefix
+    ? esc(integration.apiKeyPrefix) + '&hellip;'
+    : integration.apiKeyFromEnv
+    ? 'WEBAPP_API_KEY (Worker secret)'
+    : '<span class="text-red-600 font-semibold">none generated</span>';
+  const webhookSecretLabel = integration.webhookSecretPrefix
+    ? esc(integration.webhookSecretPrefix) + '&hellip;'
+    : integration.webhookSecretFromEnv
+    ? 'WEBAPP_WEBHOOK_SECRET (Worker secret)'
+    : '<span class="text-amber-600 font-semibold">none: webhooks are unsigned</span>';
+  const previousKeyActive = !!(integration.previousKeyExpiresAt && Date.parse(integration.previousKeyExpiresAt) > Date.now());
   const envMode = configs.environment_mode || 'sandbox';
   const activeGateway = configs.active_gateway || 'selcom';
   const webappCallbackUrl = configs.webapp_callback_url || '';
@@ -115,6 +129,12 @@ export function renderConfigView(configs, logsData, flashMessage = null, queryPa
           :class="activeTab === 'status_checker' ? 'border-indigo-600 text-indigo-600 font-semibold' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'" 
           class="whitespace-nowrap py-4 px-1 border-b-2 text-sm flex items-center gap-2">
           <i class="fa-solid fa-magnifying-glass-chart text-emerald-600"></i> Live Status Checker
+        </button>
+
+        <button @click="activeTab = 'security'" 
+          :class="activeTab === 'security' ? 'border-indigo-600 text-indigo-600 font-semibold' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'" 
+          class="whitespace-nowrap py-4 px-1 border-b-2 text-sm flex items-center gap-2">
+          <i class="fa-solid fa-lock text-indigo-600"></i> Admin Security &amp; Passwords
         </button>
       </nav>
     </div>
@@ -691,6 +711,190 @@ export function renderConfigView(configs, logsData, flashMessage = null, queryPa
       </div>
     </div>
 
+    <!-- TAB 7: ADMIN SECURITY & PASSWORDS -->
+    <div x-show="activeTab === 'security'" class="space-y-6">
+      <div class="bg-white border border-gray-200 rounded-lg p-6 shadow-sm">
+        <h2 class="text-base font-semibold text-gray-900 mb-4 border-b pb-2 flex items-center justify-between">
+          <span class="flex items-center gap-2">
+            <i class="fa-solid fa-user-shield text-indigo-600"></i> Admin Dashboard Security &amp; Password Management
+          </span>
+          <span class="${adminCreds.isUsingDefault ? 'bg-amber-100 text-amber-800 border-amber-200' : 'bg-emerald-100 text-emerald-800 border-emerald-200'} text-xs px-3 py-1 rounded font-bold uppercase border flex items-center gap-1.5">
+            <i class="fa-solid fa-shield-halved"></i>
+            <span>${adminCreds.isUsingDefault ? 'Default Credentials Active' : 'Custom Password Configured'}</span>
+          </span>
+        </h2>
+
+        ${adminCreds.isUsingDefault ? `
+        <div class="mb-6 rounded-md bg-amber-50 border border-amber-200 p-4 text-amber-800 text-xs flex items-start gap-3">
+          <i class="fa-solid fa-triangle-exclamation text-amber-500 text-base mt-0.5 flex-shrink-0"></i>
+          <div>
+            <p class="font-bold mb-0.5">Security Recommendation</p>
+            <p>Your middleware dashboard is currently using default administrator credentials. It is highly recommended to update your password below.</p>
+          </div>
+        </div>` : ''}
+
+        <form @submit.prevent="saveSecurityCredentials()" class="space-y-6 max-w-2xl">
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div>
+              <label class="block text-xs font-semibold text-gray-700 uppercase tracking-wider mb-1">
+                Admin Username
+              </label>
+              <input 
+                type="text" 
+                x-model="securityForm.admin_username" 
+                required
+                class="w-full rounded-md border-gray-300 border p-2.5 text-sm font-medium focus:ring-indigo-500 focus:border-indigo-500"
+              />
+              <p class="text-[11px] text-gray-500 mt-1">Username used for logging into the dashboard.</p>
+            </div>
+
+            <div>
+              <label class="block text-xs font-semibold text-gray-700 uppercase tracking-wider mb-1">
+                Current Password <span class="text-red-500">*</span>
+              </label>
+              <input 
+                type="password" 
+                x-model="securityForm.current_password" 
+                required
+                placeholder="Enter current password"
+                class="w-full rounded-md border-gray-300 border p-2.5 text-sm focus:ring-indigo-500 focus:border-indigo-500"
+              />
+              <p class="text-[11px] text-gray-500 mt-1">Required to authorize security changes.</p>
+            </div>
+          </div>
+
+          <div class="border-t border-gray-100 pt-5 grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div>
+              <label class="block text-xs font-semibold text-gray-700 uppercase tracking-wider mb-1">
+                New Password
+              </label>
+              <input 
+                type="password" 
+                x-model="securityForm.new_password" 
+                placeholder="Leave blank to keep current password"
+                class="w-full rounded-md border-gray-300 border p-2.5 text-sm focus:ring-indigo-500 focus:border-indigo-500"
+              />
+              <p class="text-[11px] text-gray-500 mt-1">Minimum 10 characters, letters and numbers.</p>
+            </div>
+
+            <div>
+              <label class="block text-xs font-semibold text-gray-700 uppercase tracking-wider mb-1">
+                Confirm New Password
+              </label>
+              <input 
+                type="password" 
+                x-model="securityForm.confirm_password" 
+                placeholder="Re-enter new password"
+                class="w-full rounded-md border-gray-300 border p-2.5 text-sm focus:ring-indigo-500 focus:border-indigo-500"
+              />
+            </div>
+          </div>
+
+          <div class="pt-2 flex items-center justify-between border-t border-gray-100">
+            <button 
+              type="submit" 
+              :disabled="securityLoading"
+              class="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs rounded-md shadow-sm transition flex items-center gap-2 disabled:opacity-50"
+            >
+              <i class="fa-solid" :class="securityLoading ? 'fa-spinner fa-spin' : 'fa-floppy-disk'"></i>
+              <span>Save Admin Security Credentials</span>
+            </button>
+          </div>
+        </form>
+      </div>
+
+      <!-- WEB APP INTEGRATION CREDENTIALS -->
+      <div class="bg-white border border-gray-200 rounded-lg p-6 shadow-sm">
+        <h2 class="text-base font-semibold text-gray-900 mb-4 border-b pb-2 flex items-center justify-between">
+          <span class="flex items-center gap-2">
+            <i class="fa-solid fa-key text-indigo-600"></i> Web App Integration Credentials
+          </span>
+          <span class="${hasApiKey ? 'bg-emerald-100 text-emerald-800 border-emerald-200' : 'bg-red-100 text-red-800 border-red-200'} text-xs px-3 py-1 rounded font-bold uppercase border flex items-center gap-1.5">
+            <i class="fa-solid fa-shield-halved"></i>
+            <span>${hasApiKey ? 'API Protected By Key' : 'No API Key: API Locked'}</span>
+          </span>
+        </h2>
+
+        <p class="text-xs text-gray-600 mb-5 leading-relaxed">
+          Every call from your web application to <code class="bg-gray-100 px-1 rounded">/api/v1/payments/*</code> must carry the API key
+          as <code class="bg-gray-100 px-1 rounded">Authorization: Bearer &lt;key&gt;</code>. Every webhook this processor sends to your callback URL is
+          signed with the webhook secret (<code class="bg-gray-100 px-1 rounded">X-PP-Signature</code>). Secrets are shown exactly once when generated.
+        </p>
+
+        <!-- One-time reveal banner -->
+        <div x-show="revealedSecret.value" x-cloak class="mb-5 rounded-md bg-indigo-50 border border-indigo-200 p-4">
+          <p class="text-xs font-bold text-indigo-900 mb-1" x-text="revealedSecret.title"></p>
+          <p class="text-[11px] text-indigo-800 mb-2">Copy this value now and store it in your web app's environment. It cannot be displayed again.</p>
+          <div class="flex items-center gap-2">
+            <code class="flex-1 bg-white border border-indigo-200 rounded px-3 py-2 text-xs font-mono break-all select-all" x-text="revealedSecret.value"></code>
+            <button type="button" @click="copyRevealed()" class="px-3 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs rounded-md font-semibold">
+              <i class="fa-solid fa-copy"></i> Copy
+            </button>
+            <button type="button" @click="revealedSecret = { title: '', value: '' }" class="px-3 py-2 bg-gray-200 hover:bg-gray-300 text-gray-800 text-xs rounded-md">
+              Dismiss
+            </button>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <!-- API KEY -->
+          <div class="border border-gray-200 rounded-lg p-4 bg-gray-50">
+            <h3 class="text-sm font-bold text-gray-900 flex items-center gap-2 mb-2"><i class="fa-solid fa-right-to-bracket text-indigo-500"></i> Web App API Key</h3>
+            <dl class="text-[11px] text-gray-600 space-y-1 mb-3">
+              <div class="flex justify-between"><dt>Current key</dt><dd class="font-mono">${apiKeyLabel}</dd></div>
+              <div class="flex justify-between"><dt>Generated</dt><dd>${integration.apiKeyCreatedAt ? esc(integration.apiKeyCreatedAt) : '-'}</dd></div>
+              ${previousKeyActive ? '<div class="flex justify-between"><dt>Previous key valid until</dt><dd>' + esc(integration.previousKeyExpiresAt) + '</dd></div>' : ''}
+            </dl>
+            <div class="flex flex-wrap gap-2">
+              <button type="button" @click="rotateCredential('api-key')" :disabled="integrationLoading" class="px-3 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs rounded-md font-semibold disabled:opacity-50">
+                <i class="fa-solid fa-rotate"></i> ${integration.apiKeyPrefix ? 'Rotate API Key' : 'Generate API Key'}
+              </button>
+              ${integration.apiKeyPrefix ? '<button type="button" @click="revokeApiKeys()" :disabled="integrationLoading" class="px-3 py-2 bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 text-xs rounded-md font-semibold disabled:opacity-50"><i class="fa-solid fa-ban"></i> Revoke All Keys</button>' : ''}
+            </div>
+          </div>
+
+          <!-- WEBHOOK SECRET -->
+          <div class="border border-gray-200 rounded-lg p-4 bg-gray-50">
+            <h3 class="text-sm font-bold text-gray-900 flex items-center gap-2 mb-2"><i class="fa-solid fa-signature text-indigo-500"></i> Webhook Signing Secret</h3>
+            <dl class="text-[11px] text-gray-600 space-y-1 mb-3">
+              <div class="flex justify-between"><dt>Current secret</dt><dd class="font-mono">${webhookSecretLabel}</dd></div>
+              <div class="flex justify-between"><dt>Generated</dt><dd>${integration.webhookSecretCreatedAt ? esc(integration.webhookSecretCreatedAt) : '-'}</dd></div>
+            </dl>
+            <button type="button" @click="rotateCredential('webhook-secret')" :disabled="integrationLoading" class="px-3 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs rounded-md font-semibold disabled:opacity-50">
+              <i class="fa-solid fa-rotate"></i> ${integration.webhookSecretPrefix ? 'Rotate Webhook Secret' : 'Generate Webhook Secret'}
+            </button>
+            <p class="text-[11px] text-gray-500 mt-2">Rotating takes effect immediately; update the web app at the same time.</p>
+          </div>
+        </div>
+
+        <!-- POLICY -->
+        <form @submit.prevent="saveIntegrationSettings()" class="mt-6 border-t border-gray-100 pt-5 space-y-4">
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div>
+              <label class="block text-xs font-semibold text-gray-700 uppercase tracking-wider mb-1">Allowed Browser Origins (CORS)</label>
+              <input type="text" x-model="integrationForm.allowed_origins" placeholder="https://app.example.com, https://staging.example.com"
+                class="w-full rounded-md border-gray-300 border p-2.5 text-xs font-mono focus:ring-indigo-500 focus:border-indigo-500">
+              <p class="text-[11px] text-gray-500 mt-1">Leave empty for server-to-server only (recommended). Browser calls from other origins are blocked.</p>
+            </div>
+            <div>
+              <label class="block text-xs font-semibold text-gray-700 uppercase tracking-wider mb-1">Request Signing</label>
+              <label class="flex items-start gap-2 text-xs text-gray-700 mt-2">
+                <input type="checkbox" x-model="integrationForm.require_signed_requests" class="mt-0.5 rounded border-gray-300">
+                <span>Require <code class="bg-gray-100 px-1 rounded">X-PP-Timestamp</code> + <code class="bg-gray-100 px-1 rounded">X-PP-Signature</code> on every API call (replay and tamper protection). Signatures are always verified when present.</span>
+              </label>
+            </div>
+          </div>
+          <div class="flex items-center gap-3">
+            <button type="submit" :disabled="integrationLoading" class="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs rounded-md shadow-sm transition flex items-center gap-2 disabled:opacity-50">
+              <i class="fa-solid" :class="integrationLoading ? 'fa-spinner fa-spin' : 'fa-floppy-disk'"></i>
+              <span>Save Integration Settings</span>
+            </button>
+            <span class="text-[11px] text-gray-500">Rotation and revocation prompt for your current admin password.</span>
+          </div>
+        </form>
+      </div>
+    </div>
+
     <!-- MODAL 1: INSPECT PAYMENT LOG -->
     <div x-show="showModal" class="fixed inset-0 z-50 bg-black bg-opacity-50 flex items-center justify-center p-4" x-cloak>
       <div class="bg-white rounded-lg shadow-xl max-w-3xl w-full max-h-[90vh] flex flex-col">
@@ -801,6 +1005,23 @@ export function renderConfigView(configs, logsData, flashMessage = null, queryPa
         modalLog: null,
         saving: false,
         testing: false,
+
+        // Security Form state
+        securityForm: {
+          admin_username: '${adminCreds.username || 'admin'}',
+          current_password: '',
+          new_password: '',
+          confirm_password: '',
+        },
+        securityLoading: false,
+
+        // Web app integration state
+        integrationLoading: false,
+        revealedSecret: { title: '', value: '' },
+        integrationForm: {
+          allowed_origins: ${jsStr(integration.allowedOrigins)},
+          require_signed_requests: ${integration.requireSignedRequests ? 'true' : 'false'},
+        },
 
         // Toast state
         toast: { show: false, type: 'info', title: '', message: '' },
@@ -1104,11 +1325,112 @@ export function renderConfigView(configs, logsData, flashMessage = null, queryPa
 
         exportLogs(format) {
           window.location.href = '/logs/export?format=' + format;
+        },
+
+        async rotateCredential(kind) {
+          const label = kind === 'api-key' ? 'API key' : 'webhook signing secret';
+          const pwd = prompt('Enter your current admin password to generate a new ' + label + ':');
+          if (!pwd) return;
+          this.integrationLoading = true;
+          try {
+            const res = await fetch('/config/' + kind + '/rotate', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ current_password: pwd }),
+            });
+            const data = await res.json();
+            if (data.success) {
+              this.revealedSecret = {
+                title: kind === 'api-key' ? 'New Web App API Key (Authorization: Bearer ...)' : 'New Webhook Signing Secret',
+                value: data.api_key || data.webhook_secret || '',
+              };
+              this.showToast('success', 'Credential Generated', data.message);
+            } else {
+              this.showToast('error', 'Generation Failed', data.message);
+            }
+          } catch (e) {
+            this.showToast('error', 'Request Error', e.message);
+          } finally {
+            this.integrationLoading = false;
+          }
+        },
+
+        async revokeApiKeys() {
+          if (!confirm('Revoke ALL web app API keys? Your web application will be locked out until a new key is generated and deployed.')) return;
+          const pwd = prompt('Enter your current admin password to confirm revocation:');
+          if (!pwd) return;
+          this.integrationLoading = true;
+          try {
+            const res = await fetch('/config/api-key/revoke', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ current_password: pwd }),
+            });
+            const data = await res.json();
+            this.showToast(data.success ? 'success' : 'error', data.success ? 'Keys Revoked' : 'Revocation Failed', data.message);
+            if (data.success) setTimeout(() => { window.location.href = '/?tab=security'; }, 1200);
+          } catch (e) {
+            this.showToast('error', 'Request Error', e.message);
+          } finally {
+            this.integrationLoading = false;
+          }
+        },
+
+        async saveIntegrationSettings() {
+          this.integrationLoading = true;
+          try {
+            const res = await fetch('/config/integration', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(this.integrationForm),
+            });
+            const data = await res.json();
+            this.showToast(data.success ? 'success' : 'error', data.success ? 'Settings Saved' : 'Save Failed', data.message);
+          } catch (e) {
+            this.showToast('error', 'Request Error', e.message);
+          } finally {
+            this.integrationLoading = false;
+          }
+        },
+
+        copyRevealed() {
+          if (!this.revealedSecret.value) return;
+          navigator.clipboard.writeText(this.revealedSecret.value);
+          this.showToast('info', 'Copied', 'Credential copied to clipboard.');
+        },
+
+        async saveSecurityCredentials() {
+          if (this.securityForm.new_password && this.securityForm.new_password !== this.securityForm.confirm_password) {
+            this.showToast('error', 'Password Mismatch', 'New password and confirmation password do not match.');
+            return;
+          }
+          this.securityLoading = true;
+          try {
+            const res = await fetch('/config/save-security', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(this.securityForm),
+            });
+            const data = await res.json();
+            if (data.success) {
+              this.showToast('success', 'Security Updated', data.message);
+              this.securityForm.current_password = '';
+              this.securityForm.new_password = '';
+              this.securityForm.confirm_password = '';
+              setTimeout(() => { window.location.reload(); }, 1200);
+            } else {
+              this.showToast('error', 'Update Failed', data.message);
+            }
+          } catch (e) {
+            this.showToast('error', 'Request Error', e.message);
+          } finally {
+            this.securityLoading = false;
+          }
         }
       };
     }
   </script>
   `;
 
-  return renderLayout({ title: 'Control Panel & Gateway Panels', activeTab: 'config', content, flashMessage });
+  return renderLayout({ title: 'Control Panel & Gateway Panels', activeTab: 'config', content, flashMessage, adminUser: adminCreds.username || 'admin' });
 }

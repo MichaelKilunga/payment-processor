@@ -1,4 +1,4 @@
-import crypto from 'node:crypto';
+import { hmacSha256, safeEqual } from '../utils/security.js';
 import { logOutboundRequest } from '../utils/outboundLogger.js';
 
 export class AzamPayGateway {
@@ -39,7 +39,7 @@ export class AzamPayGateway {
     const apiKey = ((await dbClient.getGatewayConfig('azampay', 'api_key', envMode)) || '').trim();
 
     const phone = this.formatPhoneNumber(params.phone || '');
-    const provider = params.provider || this.detectOperator(phone);
+    const provider = this.normalizeProvider(params.provider) || this.detectOperator(phone);
     const externalId = params.external_reference || `GTY-1-${Date.now()}`;
 
     if (!provider) {
@@ -177,7 +177,7 @@ export class AzamPayGateway {
 
       let errorMsg = responseBody?.message || `Gateway failed to initiate payment (HTTP ${checkoutRes.status})`;
       if (errorMsg.includes('Invalid Vendor')) {
-        errorMsg += ' (Check that X-API-KEY in Gateway Settings matches your portal API Key).';
+        errorMsg += ` (Detected operator/vendor '${provider}' may be invalid for phone '${phone}' or not supported on this account).`;
       }
 
       return {
@@ -231,6 +231,7 @@ export class AzamPayGateway {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
         body: JSON.stringify(tokenBody),
+        signal: AbortSignal.timeout(4000),
       });
 
       const tokenText = await tokenRes.text().catch(() => '');
@@ -264,99 +265,160 @@ export class AzamPayGateway {
       };
     }
 
-    // 2. Query status
-    const statusUrl = `${baseUrl}/azampay/mno/checkout/status?externalId=${encodeURIComponent(externalReference)}`;
+    // 2. Query status using candidates with fast timeouts
+    const candidateRequests = [];
+    if (gatewayReference) {
+      candidateRequests.push({
+        url: `${baseUrl}/azampay/mno/checkout/status?transactionId=${encodeURIComponent(gatewayReference)}`,
+        method: 'GET',
+        body: null,
+      });
+    }
+    if (externalReference) {
+      candidateRequests.push({
+        url: `${baseUrl}/azampay/mno/checkout/status?externalId=${encodeURIComponent(externalReference)}`,
+        method: 'GET',
+        body: null,
+      });
+      candidateRequests.push({
+        url: `${baseUrl}/statuscheck`,
+        method: 'POST',
+        body: JSON.stringify({ MerchantReferenceId: externalReference }),
+      });
+    }
+
     const headers = {
       Authorization: `Bearer ${token}`,
       Accept: 'application/json',
+      'Content-Type': 'application/json',
     };
     if (apiKey) {
       headers['X-API-KEY'] = apiKey;
       headers['x-api-key'] = apiKey;
     }
 
-    const start = Date.now();
-    try {
-      const res = await fetch(statusUrl, { method: 'GET', headers });
-      const resText = await res.text().catch(() => '');
-      let data = null;
-      try { data = JSON.parse(resText); } catch (e) {}
+    let lastRes = null;
+    let lastResText = '';
+    let lastData = null;
 
-      await logOutboundRequest(dbClient, {
-        method: 'GET',
-        url: statusUrl,
-        headers,
-        requestBody: null,
-        responseStatus: res.status,
-        responseBody: data || resText,
-        durationMs: Date.now() - start,
-        externalReference,
-        gateway: 'azampay',
-      });
+    for (const req of candidateRequests) {
+      const start = Date.now();
+      try {
+        const fetchOptions = {
+          method: req.method,
+          headers,
+          signal: AbortSignal.timeout(3500),
+        };
+        if (req.body) fetchOptions.body = req.body;
 
-      // Parse status from response
-      const rawStatus = String(
-        data?.data?.status ||
-        data?.status ||
-        data?.transactionStatus ||
-        (data?.success === true ? 'SUCCESS' : data?.success === false ? 'FAILED' : 'PENDING')
-      ).toUpperCase();
+        const res = await fetch(req.url, fetchOptions);
+        const resText = await res.text().catch(() => '');
+        let data = null;
+        try { data = JSON.parse(resText); } catch (e) {}
 
-      let status = 'pending';
-      if (['SUCCESS', 'COMPLETED', 'PAID', 'SUCCESSFUL', 'APPROVED'].includes(rawStatus)) {
-        status = 'success';
-      } else if (['FAILED', 'DECLINED', 'REJECTED', 'EXPIRED', 'ERROR', 'CANCELLED'].includes(rawStatus)) {
-        status = 'failed';
+        await logOutboundRequest(dbClient, {
+          method: req.method,
+          url: req.url,
+          headers,
+          requestBody: req.body ? JSON.parse(req.body) : null,
+          responseStatus: res.status,
+          responseBody: data || resText,
+          durationMs: Date.now() - start,
+          externalReference,
+          gateway: 'azampay',
+        });
+
+        lastRes = res;
+        lastResText = resText;
+        lastData = data;
+
+        // If response is HTTP 200 OK and contains valid status payload
+        if (res.ok && data) {
+          break;
+        }
+      } catch (e) {
+        console.error(`Error querying AzamPay status at ${req.url}:`, e);
       }
+    }
 
-      const gatewayRef = data?.data?.transactionId || data?.transactionId || gatewayReference;
+    if (!lastRes || !lastRes.ok || !lastData) {
+      const httpStatus = lastRes ? lastRes.status : 500;
+      const errorDetail =
+        httpStatus === 404
+          ? `Transaction reference not found on AzamPay gateway (HTTP 404)`
+          : `AzamPay status query returned HTTP ${httpStatus}: ${lastData?.message || lastResText || 'Unknown error'}`;
 
       return {
-        success: true,
-        status,
-        gateway_reference: gatewayRef,
-        raw_response: data || { status: res.status, body: resText },
-        message: status === 'success'
+        success: false,
+        status: 'pending',
+        error_code: httpStatus,
+        error: errorDetail,
+        message: errorDetail,
+        raw_response: lastData || { status: httpStatus, body: lastResText },
+      };
+    }
+
+    // Parse status from response
+    const rawStatus = String(
+      lastData?.data?.status ||
+      lastData?.data?.transactionStatus ||
+      lastData?.status ||
+      lastData?.transactionStatus ||
+      (lastData?.success === true ? 'SUCCESS' : lastData?.success === false ? 'FAILED' : 'PENDING')
+    ).toUpperCase();
+
+    let status = 'pending';
+    if (['SUCCESS', 'COMPLETED', 'PAID', 'SUCCESSFUL', 'APPROVED'].includes(rawStatus)) {
+      status = 'success';
+    } else if (['FAILED', 'DECLINED', 'REJECTED', 'EXPIRED', 'ERROR', 'CANCELLED'].includes(rawStatus)) {
+      status = 'failed';
+    }
+
+    const gatewayRef = lastData?.data?.transactionId || lastData?.transactionId || gatewayReference;
+
+    return {
+      success: true,
+      status,
+      gateway_reference: gatewayRef,
+      raw_response: lastData || { status: lastRes.status, body: lastResText },
+      message:
+        status === 'success'
           ? 'Payment confirmed successfully via AzamPay status query'
           : status === 'failed'
           ? 'Payment failed or declined according to AzamPay status query'
           : 'Payment is still pending on AzamPay gateway',
-      };
-    } catch (e) {
-      console.error('Error querying AzamPay status:', e);
-      return {
-        success: false,
-        status: 'pending',
-        error: `AzamPay status query failed: ${e.message}`,
-      };
-    }
+    };
   }
 
-  async verifyWebhookSignature(dbClient, headers, rawBody) {
+  /**
+   * Returns 'valid' | 'invalid' | 'unsigned'.
+   * Unsigned callbacks are not trusted by the caller; it confirms the status
+   * with checkTransactionStatus() instead of applying the callback body.
+   */
+  async verifyWebhookSignature(dbClient, headers, rawBody, bodyData = {}) {
     const signature = headers.get('x-signature') || headers.get('signature');
     if (!signature) {
-      return true; // If no signature provided in emulator/sandbox, pass through
+      return 'unsigned';
     }
 
     const secret = ((await dbClient.getGatewayConfig('azampay', 'client_secret')) || '').trim();
-    if (!secret) return true;
+    if (!secret) {
+      return 'unsigned';
+    }
 
-    const computed = crypto
-      .createHmac('sha256', secret)
-      .update(rawBody || '')
-      .digest('hex');
-
-    return signature.toLowerCase() === computed.toLowerCase();
+    const computed = await hmacSha256(secret, rawBody || '');
+    const provided = String(signature).trim().replace(/^sha256=/i, '').toLowerCase();
+    return safeEqual(provided, computed) ? 'valid' : 'invalid';
   }
 
   parseCallback(data) {
-    const orderId = data.utilityref || data.externalId || null;
-    const reference = data.transactionId || null;
+    const orderId = data.utilityref || data.externalId || data.externalreference || data.order_id || null;
+    const reference = data.reference || data.transid || data.transactionId || data.mnoreference || null;
     const amount = data.amount ? parseFloat(data.amount) : 0.0;
 
-    const statusVal = String(data.status || '').toLowerCase();
+    const rawStatus = String(data.transactionstatus || data.transactionStatus || data.status || '').toLowerCase();
     let status = 'failed';
-    if (statusVal === 'success' || statusVal === 'completed' || statusVal === 'paid') {
+    if (['success', 'completed', 'paid', 'successful', 'approved'].includes(rawStatus)) {
       status = 'success';
     }
 
@@ -366,19 +428,30 @@ export class AzamPayGateway {
       gateway_reference: reference,
       amount,
       status,
-      phone: data.msisdn || '',
-      message: data.message || (status === 'success' ? 'Payment succeeded' : 'Payment failed'),
+      phone: data.msisdn || data.accountNumber || '',
+      message: data.message || (status === 'success' ? 'Payment completed successfully' : 'Payment failed'),
       timestamp: new Date().toISOString(),
     };
+  }
+
+  normalizeProvider(provider) {
+    if (!provider) return null;
+    const p = String(provider).trim().toLowerCase();
+    if (['mpesa', 'vodacom', 'voda'].includes(p)) return 'Mpesa';
+    if (['tigo', 'tigopesa', 'zantel', 'yas'].includes(p)) return 'Tigo';
+    if (['airtel', 'airtelmoney'].includes(p)) return 'Airtel';
+    if (['halopesa', 'halotel'].includes(p)) return 'Halopesa';
+    if (['azampesa', 'azam', 'ttcl'].includes(p)) return 'Azampesa';
+    return provider;
   }
 
   detectOperator(phone) {
     const cleaned = this.formatPhoneNumber(phone);
 
-    if (/^255(75|76|74|61|79)/.test(cleaned)) return 'Mpesa';
-    if (/^255(65|67|71)/.test(cleaned)) return 'Tigo';
+    if (/^255(74|75|76|79)/.test(cleaned)) return 'Mpesa';
+    if (/^255(65|67|71|77)/.test(cleaned)) return 'Tigo';
     if (/^255(68|69|78)/.test(cleaned)) return 'Airtel';
-    if (/^255(62)/.test(cleaned)) return 'Halopesa';
+    if (/^255(61|62)/.test(cleaned)) return 'Halopesa';
     if (/^255(73)/.test(cleaned)) return 'Azampesa';
 
     return null;

@@ -26,3 +26,9 @@ Homestead.json
 Homestead.yaml
 Thumbs.db
 cacert.pem
+
+# Cloudflare local dev state and temp files (never commit)
+.wrangler/
+
+# Local scratch scripts
+scratch/

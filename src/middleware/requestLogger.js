@@ -1,4 +1,9 @@
 import { DbClient } from '../db/client.js';
+import { redactBodyText } from '../utils/security.js';
+
+// Paths whose bodies are never stored (credentials / secrets in transit)
+const FULLY_REDACTED_PATHS = ['/login', '/config/save', '/config/save-security', '/config/integration'];
+const REDACTED_HEADERS = ['authorization', 'x-api-key', 'cookie', 'x-pp-signature', 'x-signature', 'digest'];
 
 export async function requestLoggerMiddleware(c, next) {
   // Skip logging internal static assets or simple polling noise if needed
@@ -39,12 +44,21 @@ export async function requestLoggerMiddleware(c, next) {
   // Sanitize headers
   const reqHeaders = {};
   c.req.raw.headers.forEach((value, key) => {
-    if (key.toLowerCase() === 'authorization' || key.toLowerCase() === 'x-api-key') {
-      reqHeaders[key] = value.substring(0, 10) + '...[REDACTED]';
+    if (REDACTED_HEADERS.includes(key.toLowerCase())) {
+      reqHeaders[key] = '[REDACTED]';
     } else {
       reqHeaders[key] = value;
     }
   });
+
+  // Sanitize request body
+  if (reqBodyText) {
+    if (FULLY_REDACTED_PATHS.some((p) => path === p || path.startsWith(p + '/'))) {
+      reqBodyText = '[REDACTED: credentials or secrets submitted on this route are never stored]';
+    } else {
+      reqBodyText = redactBodyText(reqBodyText);
+    }
+  }
 
   const ipAddress = c.req.header('cf-connecting-ip') || c.req.header('x-forwarded-for') || '127.0.0.1';
 
@@ -57,17 +71,24 @@ export async function requestLoggerMiddleware(c, next) {
   // Intercept response body
   let resBodyText = null;
   try {
-    const resClone = c.res.clone();
-    resBodyText = await resClone.text();
+    const resType = c.res.headers.get('content-type') || '';
+    if (resType.includes('text/html')) {
+      resBodyText = '[HTML response omitted]';
+    } else {
+      const resClone = c.res.clone();
+      resBodyText = redactBodyText(await resClone.text());
+    }
   } catch (e) {
     resBodyText = null;
   }
 
   // Asynchronously record request log in DB if DB binding is available
   if (c.env && c.env.DB) {
-    c.executionCtx?.waitUntil
-      ? c.executionCtx.waitUntil(saveLog())
-      : saveLog();
+    try {
+      c.executionCtx.waitUntil(saveLog());
+    } catch (e) {
+      saveLog();
+    }
   }
 
   async function saveLog() {

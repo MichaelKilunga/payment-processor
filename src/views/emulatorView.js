@@ -1,6 +1,6 @@
 import { renderLayout } from './layout.js';
 
-export function renderEmulatorView() {
+export function renderEmulatorView(adminUser = null) {
   const content = `
   <div x-data="emulatorData()" x-init="init()" class="space-y-6">
     
@@ -330,5 +330,5 @@ export function renderEmulatorView() {
     }
   </script>`;
 
-  return renderLayout({ title: 'Payment Terminal & Integration Proof Tool', activeTab: 'emulator', content });
+  return renderLayout({ title: 'Payment Terminal & Integration Proof Tool', activeTab: 'emulator', content, adminUser });
 }

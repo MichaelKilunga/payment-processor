@@ -278,6 +278,15 @@ export class DbClient {
     return this.parseLogItem(row);
   }
 
+  async findPaymentLogByGatewayRef(gatewayReference) {
+    if (!gatewayReference) return null;
+    const row = await this.db
+      .prepare('SELECT * FROM payment_logs WHERE gateway_reference = ? ORDER BY id DESC LIMIT 1')
+      .bind(gatewayReference)
+      .first();
+    return this.parseLogItem(row);
+  }
+
   async findPaymentLogById(id) {
     const row = await this.db
       .prepare('SELECT * FROM payment_logs WHERE id = ?')

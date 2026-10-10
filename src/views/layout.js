@@ -1,15 +1,17 @@
 export function renderLayout(opts = {}, legacyContent = null, legacyFlash = null) {
-  let title, activeTab, content, flashMessage;
+  let title, activeTab, content, flashMessage, adminUser;
   if (typeof opts === 'string') {
     title = opts;
     content = legacyContent || '';
     flashMessage = legacyFlash || null;
     activeTab = 'config';
+    adminUser = null;
   } else {
     title = opts.title || 'Payment Processor';
     activeTab = opts.activeTab || 'config';
     content = opts.content || '';
     flashMessage = opts.flashMessage || null;
+    adminUser = opts.adminUser || null;
   }
 
   const flashHtml = flashMessage
@@ -22,6 +24,18 @@ export function renderLayout(opts = {}, legacyContent = null, legacyFlash = null
       } text-sm">
         <p class="font-medium">${flashMessage.text}</p>
       </div>
+    </div>`
+    : '';
+
+  const userControlsHtml = adminUser
+    ? `
+    <div class="flex items-center space-x-3 ml-4 pl-4 border-l border-gray-200">
+      <span class="text-xs text-gray-600 bg-gray-100 px-2.5 py-1 rounded-full flex items-center gap-1.5 font-medium border border-gray-200" title="Logged in as Admin">
+        <i class="fa-solid fa-user-shield text-indigo-600"></i> ${adminUser}
+      </span>
+      <a href="/logout" class="text-xs text-red-600 hover:text-red-700 hover:bg-red-50 px-2.5 py-1 rounded-md transition font-medium border border-red-100 flex items-center gap-1">
+        <i class="fa-solid fa-right-from-bracket"></i> Logout
+      </a>
     </div>`
     : '';
 
@@ -47,18 +61,21 @@ export function renderLayout(opts = {}, legacyContent = null, legacyFlash = null
           </div>
           <span class="font-bold text-lg text-gray-900">Payment Processor Middleware</span>
         </div>
-        <nav class="flex space-x-4">
-          <a href="/" class="px-3.5 py-2 text-sm font-medium rounded-md transition ${
-            activeTab === 'config'
-              ? 'bg-indigo-50 text-indigo-700 font-semibold border border-indigo-100'
-              : 'text-gray-600 hover:text-gray-900 hover:bg-gray-50'
-          }">Configurations &amp; Gateway Panels</a>
-          <a href="/emulator" class="px-3.5 py-2 text-sm font-medium rounded-md transition ${
-            activeTab === 'emulator'
-              ? 'bg-indigo-50 text-indigo-700 font-semibold border border-indigo-100'
-              : 'text-gray-600 hover:text-gray-900 hover:bg-gray-50'
-          }">Emulator Sandbox</a>
-        </nav>
+        <div class="flex items-center">
+          <nav class="flex space-x-4">
+            <a href="/" class="px-3.5 py-2 text-sm font-medium rounded-md transition ${
+              activeTab === 'config'
+                ? 'bg-indigo-50 text-indigo-700 font-semibold border border-indigo-100'
+                : 'text-gray-600 hover:text-gray-900 hover:bg-gray-50'
+            }">Configurations &amp; Gateway Panels</a>
+            <a href="/emulator" class="px-3.5 py-2 text-sm font-medium rounded-md transition ${
+              activeTab === 'emulator'
+                ? 'bg-indigo-50 text-indigo-700 font-semibold border border-indigo-100'
+                : 'text-gray-600 hover:text-gray-900 hover:bg-gray-50'
+            }">Emulator Sandbox</a>
+          </nav>
+          ${userControlsHtml}
+        </div>
       </div>
     </div>
   </header>

@@ -1,16 +1,31 @@
 import { Hono } from 'hono';
 import { DbClient } from '../db/client.js';
 import { PaymentProcessorManager } from '../gateways/PaymentProcessorManager.js';
-import { logOutboundRequest } from '../utils/outboundLogger.js';
+import { requireApiClient, requireAdminSession } from '../utils/apiAuth.js';
+import { buildWebhookPayload, deliverWebhook } from '../utils/webhookDispatcher.js';
+import { rateLimit, clientIp, validateWebhookUrl } from '../utils/security.js';
 
 export const apiRoutes = new Hono();
 const manager = new PaymentProcessorManager();
 
+const FINAL_STATUSES = ['success', 'failed'];
+
+function getExecutionCtx(c) {
+  try {
+    return c.executionCtx;
+  } catch (e) {
+    return null;
+  }
+}
+
 /**
  * Shared status check helper
  */
-export async function performStatusCheck(dbClient, externalRef) {
+export async function performStatusCheck(dbClient, externalRef, env = {}, executionCtx = null) {
   let log = await dbClient.findPaymentLogByRef(externalRef);
+  if (!log) {
+    log = await dbClient.findPaymentLogByGatewayRef(externalRef);
+  }
   if (!log) {
     return {
       statusCode: 404,
@@ -30,54 +45,20 @@ export async function performStatusCheck(dbClient, externalRef) {
         remoteCheckResult = await gatewayObj.checkTransactionStatus(dbClient, log.external_reference, log.gateway_reference);
 
         if (remoteCheckResult && remoteCheckResult.success && remoteCheckResult.status !== 'pending') {
-          // Update DB record
           await dbClient.updatePaymentLog(log.id, {
             status: remoteCheckResult.status,
             gateway_reference: remoteCheckResult.gateway_reference || log.gateway_reference,
             raw_response: remoteCheckResult.raw_response || null,
           });
 
-          // Re-fetch updated log
           log = await dbClient.findPaymentLogById(log.id);
 
-          // Forward updated status callback to WebApp if webapp_callback_url is configured
-          const webappCallbackUrl = await dbClient.getConfig('webapp_callback_url');
-          if (webappCallbackUrl) {
-            const parsedCallback = {
-              external_reference: log.external_reference,
-              gateway: log.gateway,
-              gateway_reference: log.gateway_reference,
-              amount: log.amount,
-              status: log.status,
-              phone: log.phone,
-              message: `Status updated via direct gateway check: ${remoteCheckResult.message || log.status}`,
-              timestamp: new Date().toISOString(),
-            };
-
-            const cbStart = Date.now();
-            try {
-              const fwdRes = await fetch(webappCallbackUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(parsedCallback),
-              });
-              const fwdText = await fwdRes.text().catch(() => '');
-
-              await logOutboundRequest(dbClient, {
-                method: 'POST',
-                url: webappCallbackUrl,
-                headers: { 'Content-Type': 'application/json' },
-                requestBody: parsedCallback,
-                responseStatus: fwdRes.status,
-                responseBody: fwdText,
-                durationMs: Date.now() - cbStart,
-                externalReference: log.external_reference,
-                gateway: log.gateway,
-              });
-            } catch (e) {
-              console.error('Error forwarding callback to WebApp during status check:', e);
-            }
-          }
+          const payload = buildWebhookPayload(
+            log,
+            `Status updated via direct gateway check: ${remoteCheckResult.message || log.status}`,
+            { source: 'status_query' }
+          );
+          await deliverWebhook(dbClient, env, payload, { executionCtx });
         }
       }
     } catch (e) {
@@ -108,6 +89,35 @@ export async function performStatusCheck(dbClient, externalRef) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Web application API (API key or admin session required)
+// ---------------------------------------------------------------------------
+apiRoutes.use('/v1/payments/initiate', requireApiClient);
+apiRoutes.use('/v1/payments/status/*', requireApiClient);
+apiRoutes.use('/v1/payments/check-status', requireApiClient);
+apiRoutes.use('/v1/environment', requireApiClient);
+
+// Privileged / administrative endpoints (dashboard session only)
+apiRoutes.use('/v1/payments/mark-paid', requireAdminSession);
+apiRoutes.use('/v1/config', requireAdminSession);
+apiRoutes.use('/v1/logs', requireAdminSession);
+apiRoutes.use('/v1/requests', requireAdminSession);
+
+// GET /api/v1/environment (lets the web app verify which mode the processor is running in)
+apiRoutes.get('/v1/environment', async (c) => {
+  const dbClient = new DbClient(c.env.DB);
+  const mode = (await dbClient.getConfig('environment_mode', 'sandbox')) === 'live' ? 'live' : 'sandbox';
+  return c.json({
+    success: true,
+    environment_mode: mode,
+    is_sandbox: mode === 'sandbox',
+    active_gateway: await dbClient.getConfig('active_gateway', 'selcom'),
+    available_gateways: manager.getAvailableDrivers(),
+    emulator_enabled: mode === 'sandbox',
+    server_time: new Date().toISOString(),
+  });
+});
+
 // POST /api/v1/payments/initiate
 apiRoutes.post('/v1/payments/initiate', async (c) => {
   const dbClient = new DbClient(c.env.DB);
@@ -123,11 +133,36 @@ apiRoutes.post('/v1/payments/initiate', async (c) => {
   if (!amount || isNaN(amount) || Number(amount) < 1) {
     return c.json({ success: false, message: 'The amount field is required and must be at least 1.' }, 400);
   }
-  if (!phone) {
-    return c.json({ success: false, message: 'The phone field is required.' }, 400);
+  if (!phone || !/^[0-9+\s-]{9,16}$/.test(String(phone))) {
+    return c.json({ success: false, message: 'The phone field is required and must be a valid phone number.' }, 400);
   }
-  if (!external_reference) {
-    return c.json({ success: false, message: 'The external_reference field is required.' }, 400);
+  if (!external_reference || String(external_reference).length > 128) {
+    return c.json({ success: false, message: 'The external_reference field is required (max 128 characters).' }, 400);
+  }
+
+  // Protect against duplicate initiation of the same order while it is pending or already paid
+  const existing = await dbClient.findPaymentLogByRef(String(external_reference));
+  if (existing && existing.status === 'success') {
+    return c.json(
+      {
+        success: false,
+        external_reference,
+        status: existing.status,
+        message: 'A payment with this external_reference has already completed successfully.',
+      },
+      409
+    );
+  }
+
+  // Tighter per-phone throttle to stop USSD push spam
+  const phoneOk = await rateLimit(c.env, {
+    binding: 'API_RATE_LIMITER',
+    key: `initiate:${String(phone).replace(/\D/g, '')}`,
+    limit: 5,
+    periodSec: 60,
+  });
+  if (!phoneOk) {
+    return c.json({ success: false, message: 'Too many payment requests for this phone number. Try again shortly.' }, 429);
   }
 
   const gatewayName = reqGateway || (await dbClient.getConfig('active_gateway', 'selcom'));
@@ -139,9 +174,8 @@ apiRoutes.post('/v1/payments/initiate', async (c) => {
     return c.json({ success: false, message: e.message }, 400);
   }
 
-  // Create log record
   const logId = await dbClient.createPaymentLog({
-    external_reference,
+    external_reference: String(external_reference),
     gateway: gateway.getName(),
     amount: parseFloat(amount),
     phone: String(phone),
@@ -151,7 +185,6 @@ apiRoutes.post('/v1/payments/initiate', async (c) => {
 
   const originUrl = new URL(c.req.url).origin;
 
-  // Call gateway
   const result = await gateway.initiatePayment(
     dbClient,
     {
@@ -167,7 +200,6 @@ apiRoutes.post('/v1/payments/initiate', async (c) => {
     originUrl
   );
 
-  // Update log record
   await dbClient.updatePaymentLog(logId, {
     gateway_reference: result.gateway_reference || null,
     status: result.success ? 'pending' : 'failed',
@@ -198,7 +230,7 @@ apiRoutes.post('/v1/payments/initiate', async (c) => {
 apiRoutes.get('/v1/payments/status/:external_reference', async (c) => {
   const dbClient = new DbClient(c.env.DB);
   const externalRef = c.req.param('external_reference');
-  const res = await performStatusCheck(dbClient, externalRef);
+  const res = await performStatusCheck(dbClient, externalRef, c.env, getExecutionCtx(c));
   return c.json(res.payload, res.statusCode);
 });
 
@@ -211,98 +243,281 @@ apiRoutes.post('/v1/payments/check-status', async (c) => {
   if (!externalRef) {
     return c.json({ success: false, message: 'external_reference field is required.' }, 400);
   }
-  const res = await performStatusCheck(dbClient, externalRef);
+  const res = await performStatusCheck(dbClient, externalRef, c.env, getExecutionCtx(c));
   return c.json(res.payload, res.statusCode);
 });
 
-// POST /api/v1/callbacks/:gateway
-apiRoutes.post('/v1/callbacks/:gateway', async (c) => {
+// POST /api/v1/payments/mark-paid (ADMIN ONLY: manually mark payment as success & trigger WebApp callback)
+apiRoutes.post('/v1/payments/mark-paid', async (c) => {
   const dbClient = new DbClient(c.env.DB);
-  const gatewayName = c.req.param('gateway');
+  let body = {};
+  try { body = await c.req.json(); } catch (e) {}
 
-  let bodyData = {};
-  const rawBody = await c.req.text().catch(() => '');
-  try {
-    bodyData = JSON.parse(rawBody);
-  } catch (e) {
-    // If form data or non-JSON
+  const externalRef = body.external_reference || body.external_id || body.order_id;
+  if (!externalRef) {
+    return c.json({ success: false, message: 'external_reference field is required.' }, 400);
   }
 
-  console.log(`Incoming callback from: ${gatewayName}`, {
-    headers: Object.fromEntries(c.req.raw.headers.entries()),
-    body: bodyData,
+  let log = await dbClient.findPaymentLogByRef(externalRef);
+  if (!log) {
+    return c.json({ success: false, message: 'Payment log record not found.' }, 404);
+  }
+
+  const adminUser = c.get('adminUser') || 'admin';
+  const gatewayRef = body.gateway_reference || log.gateway_reference || `MANUAL-${Date.now()}`;
+
+  await dbClient.updatePaymentLog(log.id, {
+    status: 'success',
+    gateway_reference: gatewayRef,
+  });
+  console.warn(`[AUDIT] Admin "${adminUser}" manually marked ${log.external_reference} as paid from ${clientIp(c)}`);
+
+  log = await dbClient.findPaymentLogById(log.id);
+
+  const payload = buildWebhookPayload(log, `Payment status manually confirmed by administrator (${adminUser})`, {
+    source: 'manual',
+  });
+  const delivery = await deliverWebhook(dbClient, c.env, payload, { executionCtx: getExecutionCtx(c) });
+
+  return c.json({
+    success: true,
+    external_reference: log.external_reference,
+    status: 'success',
+    amount: log.amount,
+    gateway: log.gateway,
+    gateway_reference: log.gateway_reference,
+    callback_delivered: delivery.delivered,
+    callback_detail: delivery.detail,
+    event_id: delivery.event_id || null,
+    message: 'Payment status manually updated to SUCCESS and webhook callback triggered.',
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Gateway webhook callbacks (AzamPay / Selcom -> processor)
+// ---------------------------------------------------------------------------
+
+function parseCallbackBody(rawBody, contentType = '') {
+  if (!rawBody) return {};
+  try {
+    return JSON.parse(rawBody);
+  } catch (e) {
+    // fall through
+  }
+  if (contentType.includes('application/x-www-form-urlencoded') || /^[^=&\s]+=[^&]*(&[^=&\s]+=[^&]*)*$/.test(rawBody.trim())) {
+    try {
+      return Object.fromEntries(new URLSearchParams(rawBody).entries());
+    } catch (e) {
+      return {};
+    }
+  }
+  return {};
+}
+
+function candidateReferences(bodyData) {
+  return [
+    bodyData.utilityref,
+    bodyData.externalId,
+    bodyData.externalreference,
+    bodyData.external_reference,
+    bodyData.order_id,
+    bodyData.reference,
+    bodyData.transid,
+    bodyData.transactionId,
+    bodyData.mnoreference,
+  ]
+    .filter((v) => v !== undefined && v !== null && String(v).trim() !== '')
+    .map((v) => String(v));
+}
+
+function detectGatewayFromBody(bodyData) {
+  if (
+    bodyData.utilityref ||
+    bodyData.mnoreference ||
+    bodyData.operator ||
+    bodyData.transactionstatus ||
+    (bodyData.reference && String(bodyData.reference).startsWith('AZM'))
+  ) {
+    return 'azampay';
+  }
+  if (bodyData.order_id || (bodyData.transid && !bodyData.utilityref)) {
+    return 'selcom';
+  }
+  return null;
+}
+
+/**
+ * Universal webhook callback handler for all gateways and paths.
+ *
+ * Security model:
+ *  - The transaction is resolved from OUR database first, so the body cannot
+ *    choose which gateway's verifier runs.
+ *  - A cryptographically valid gateway signature is trusted directly.
+ *  - A callback without a signature (or with a stale timestamp) is treated as a
+ *    hint only: the processor queries the gateway's status API and applies what
+ *    the gateway says, never what the callback claims.
+ *  - A callback with a present but invalid signature is rejected.
+ *  - Amount must match the initiated amount; a completed payment is never downgraded.
+ *  - Callbacks for unknown transactions are acknowledged but never forwarded.
+ */
+async function handleGatewayCallback(c, explicitGateway = null) {
+  const dbClient = new DbClient(c.env.DB);
+
+  const ip = clientIp(c);
+  const allowed = await rateLimit(c.env, { binding: 'API_RATE_LIMITER', key: `callback:${ip}`, limit: 120, periodSec: 60 });
+  if (!allowed) {
+    return c.json({ success: false, message: 'Rate limit exceeded.' }, 429);
+  }
+
+  const rawBody = await c.req.text().catch(() => '');
+  const bodyData = parseCallbackBody(rawBody, c.req.header('content-type') || '');
+  const pathGateway = explicitGateway || c.req.param('gateway') || null;
+
+  // 1. Resolve the transaction from our own records first
+  let log = null;
+  for (const ref of candidateReferences(bodyData)) {
+    log = (await dbClient.findPaymentLogByRef(ref)) || (await dbClient.findPaymentLogByGatewayRef(ref));
+    if (log) break;
+  }
+
+  let gatewayName = pathGateway ? String(pathGateway).toLowerCase() : null;
+  if (log) {
+    if (gatewayName && gatewayName !== log.gateway) {
+      console.warn(`Callback path gateway [${gatewayName}] does not match stored gateway [${log.gateway}] for ${log.external_reference}`);
+      return c.json({ success: false, message: 'Gateway mismatch for referenced transaction.' }, 400);
+    }
+    gatewayName = log.gateway;
+  }
+  if (!gatewayName) {
+    gatewayName = detectGatewayFromBody(bodyData) || (await dbClient.getConfig('active_gateway', 'azampay'));
+  }
+
+  console.log(`Incoming callback for gateway [${gatewayName}] from ${ip}`, {
+    path: c.req.path,
+    matched: !!log,
+    reference: log ? log.external_reference : candidateReferences(bodyData)[0] || null,
   });
 
   let gateway;
   try {
     gateway = await manager.getGateway(dbClient, gatewayName);
   } catch (e) {
-    return c.json({ error: e.message }, 400);
+    return c.json({ success: false, message: 'Unsupported gateway.' }, 400);
   }
 
-  // Verify signature
-  const isValidSig = await gateway.verifyWebhookSignature(dbClient, c.req.raw.headers, rawBody || bodyData);
-  if (!isValidSig) {
-    console.warn(`Callback signature verification failed for gateway: ${gatewayName}`);
-    return c.json({ error: 'Invalid signature' }, 403);
+  // 2. Signature verification: 'valid' | 'invalid' | 'unsigned'
+  const sigState = normalizeSignatureState(
+    await gateway.verifyWebhookSignature(dbClient, c.req.raw.headers, rawBody, bodyData)
+  );
+  if (sigState === 'invalid') {
+    console.warn(`Callback signature verification FAILED for gateway: ${gatewayName}`);
+    return c.json({ success: false, message: 'Invalid signature' }, 403);
   }
 
-  // Parse callback
-  const parsed = gateway.parseCallback(bodyData);
-
-  // Update transaction log
-  const log = await dbClient.findPaymentLogByRef(parsed.external_reference, gatewayName);
-  if (log) {
-    await dbClient.updatePaymentLog(log.id, {
-      gateway_reference: parsed.gateway_reference || log.gateway_reference,
-      status: parsed.status,
-      callback_payload: bodyData,
-    });
-  } else {
-    console.warn(`Transaction log not found for reference: ${parsed.external_reference || 'n/a'}`);
+  if (!log) {
+    console.warn(`Callback ignored: no matching transaction (gateway=${gatewayName}, signature=${sigState})`);
+    return c.json({ success: true, status: 'acknowledged', applied: false, reason: 'unknown_transaction' });
   }
 
-  // Forward callback to Web Application
-  const webappCallbackUrl = await dbClient.getConfig('webapp_callback_url');
-  if (webappCallbackUrl) {
-    const cbStart = Date.now();
+  let parsed = gateway.parseCallback(bodyData);
+  let confirmation = sigState === 'valid' ? 'signature' : null;
+
+  // 3. Unsigned callbacks are confirmed against the gateway's status API
+  if (sigState !== 'valid') {
+    let remote = null;
     try {
-      const fwdRes = await fetch(webappCallbackUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(parsed),
-      });
-      const fwdText = await fwdRes.text().catch(() => '');
-
-      await logOutboundRequest(dbClient, {
-        method: 'POST',
-        url: webappCallbackUrl,
-        headers: { 'Content-Type': 'application/json' },
-        requestBody: parsed,
-        responseStatus: fwdRes.status,
-        responseBody: fwdText,
-        durationMs: Date.now() - cbStart,
-        externalReference: parsed.external_reference,
-        gateway: gatewayName,
-      });
-
-      if (!fwdRes.ok) {
-        console.error(`Failed to forward callback to WebApp. Status: ${fwdRes.status}`);
-      } else {
-        console.log(`Successfully forwarded callback to WebApp. Ref: ${parsed.external_reference}`);
-      }
+      remote = await gateway.checkTransactionStatus(dbClient, log.external_reference, log.gateway_reference || parsed.gateway_reference);
     } catch (e) {
-      console.error('Exception occurred while forwarding callback to WebApp:', e.message);
+      console.error('Gateway status confirmation failed:', e);
     }
-  } else {
-    console.warn('WebApp callback URL is not configured. Skipped forwarding.');
+    if (remote && remote.success && FINAL_STATUSES.includes(remote.status)) {
+      parsed = {
+        ...parsed,
+        status: remote.status,
+        gateway_reference: remote.gateway_reference || parsed.gateway_reference,
+        message: remote.message || parsed.message,
+      };
+      confirmation = 'status_query';
+    } else {
+      console.warn(`Unsigned callback for ${log.external_reference} could not be confirmed with ${gatewayName}; status unchanged.`);
+      return c.json(
+        {
+          success: true,
+          status: 'acknowledged',
+          applied: false,
+          reason: 'unsigned_callback_unconfirmed',
+          message: 'Callback was not signed and the gateway did not confirm a final status. No changes applied.',
+        },
+        202
+      );
+    }
   }
 
-  return c.json({
-    success: true,
-    status: 'acknowledged',
+  // 4. Amount integrity (only when the callback carries an amount)
+  if (parsed.status === 'success' && parsed.amount > 0 && Math.abs(parsed.amount - Number(log.amount)) > 0.009) {
+    console.warn(`Callback amount mismatch for ${log.external_reference}: expected ${log.amount}, got ${parsed.amount}`);
+    await dbClient.updatePaymentLog(log.id, { callback_payload: { ...bodyData, _rejected: 'amount_mismatch' } });
+    return c.json({ success: false, message: 'Amount mismatch for referenced transaction.' }, 400);
+  }
+
+  // 5. Status state machine: never downgrade a completed payment, ignore duplicates
+  if (log.status === 'success' && parsed.status !== 'success') {
+    return c.json({ success: true, status: 'acknowledged', applied: false, reason: 'already_completed' });
+  }
+  if (log.status === parsed.status && FINAL_STATUSES.includes(log.status)) {
+    return c.json({ success: true, status: 'acknowledged', applied: false, reason: 'duplicate' });
+  }
+
+  await dbClient.updatePaymentLog(log.id, {
+    gateway_reference: parsed.gateway_reference || log.gateway_reference,
+    status: parsed.status,
+    callback_payload: bodyData,
   });
-});
+  console.log(`Updated payment log ID ${log.id} (${log.external_reference}) status to ${parsed.status} [confirmed via ${confirmation}]`);
+
+  log = await dbClient.findPaymentLogById(log.id);
+
+  // 6. Forward normalized, signed notification to the web application
+  const payload = buildWebhookPayload(log, parsed.message, { source: 'gateway_callback' });
+  const delivery = await deliverWebhook(dbClient, c.env, payload, { executionCtx: getExecutionCtx(c) });
+  if (!delivery.delivered && !delivery.skipped) {
+    console.error(`Failed to forward callback to WebApp: ${delivery.detail}`);
+  }
+
+  return c.json({ success: true, status: 'acknowledged', applied: true });
+}
+
+function normalizeSignatureState(result) {
+  if (result === true) return 'valid';
+  if (result === false) return 'invalid';
+  if (result === 'valid' || result === 'invalid' || result === 'unsigned') return result;
+  return 'invalid';
+}
+
+const callbackReady = (label) => async (c) => c.json({ success: true, message: `${label} callback endpoint is ready.` });
+
+// Callback endpoints (GET for health check, POST for real webhook processing)
+apiRoutes.get('/v1/callbacks/:gateway', callbackReady('Gateway'));
+apiRoutes.post('/v1/callbacks/:gateway', (c) => handleGatewayCallback(c));
+
+apiRoutes.get('/v1/callbacks', callbackReady('Gateway'));
+apiRoutes.post('/v1/callbacks', (c) => handleGatewayCallback(c));
+
+apiRoutes.get('/callbacks/:gateway', callbackReady('Gateway'));
+apiRoutes.post('/callbacks/:gateway', (c) => handleGatewayCallback(c));
+
+apiRoutes.get('/callbacks', callbackReady('Gateway'));
+apiRoutes.post('/callbacks', (c) => handleGatewayCallback(c));
+
+apiRoutes.get('/payments/callback', callbackReady('Payments'));
+apiRoutes.post('/payments/callback', (c) => handleGatewayCallback(c));
+
+apiRoutes.get('/v1/payments/callback', callbackReady('Payments'));
+apiRoutes.post('/v1/payments/callback', (c) => handleGatewayCallback(c));
+
+// ---------------------------------------------------------------------------
+// Admin configuration & inspection (dashboard session only)
+// ---------------------------------------------------------------------------
 
 // GET /api/v1/config
 apiRoutes.get('/v1/config', async (c) => {
@@ -327,7 +542,11 @@ apiRoutes.post('/v1/config', async (c) => {
   }
 
   if (body.webapp_callback_url !== undefined) {
-    await dbClient.setConfig('webapp_callback_url', body.webapp_callback_url);
+    const check = validateWebhookUrl(body.webapp_callback_url);
+    if (!check.ok) {
+      return c.json({ success: false, message: check.error }, 400);
+    }
+    await dbClient.setConfig('webapp_callback_url', check.url);
   }
 
   return c.json({
@@ -345,7 +564,7 @@ apiRoutes.get('/v1/logs', async (c) => {
   const gateway = c.req.query('gateway') || '';
   const status = c.req.query('status') || '';
   const page = parseInt(c.req.query('page') || '1', 10);
-  const perPage = parseInt(c.req.query('per_page') || '10', 10);
+  const perPage = Math.min(parseInt(c.req.query('per_page') || '10', 10), 100);
 
   const logs = await dbClient.getPaymentLogs({ search, gateway, status, page, perPage });
   return c.json(logs);
@@ -359,7 +578,7 @@ apiRoutes.get('/v1/requests', async (c) => {
   const status = c.req.query('status') || '';
   const method = c.req.query('method') || '';
   const page = parseInt(c.req.query('page') || '1', 10);
-  const perPage = parseInt(c.req.query('per_page') || '20', 10);
+  const perPage = Math.min(parseInt(c.req.query('per_page') || '20', 10), 100);
 
   const logs = await dbClient.getRequestLogs({ search, direction, status, method, page, perPage });
   return c.json(logs);
