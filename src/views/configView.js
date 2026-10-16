@@ -488,7 +488,7 @@ export function renderConfigView(configs, logsData, flashMessage = null, queryPa
               <tr class="hover:bg-gray-50 transition">
                 <td class="py-3 px-4 font-mono">
                   <div class="font-bold text-gray-900" x-text="l.external_reference"></div>
-                  <div class="text-[10px] text-gray-400" x-text="l.created_at"></div>
+                  <div class="text-[10px] text-gray-400" :title="l.created_at" x-text="formatDate(l.created_at)"></div>
                 </td>
                 <td class="py-3 px-4">
                   <span :class="l.gateway === 'azampay' ? 'bg-amber-100 text-amber-800' : 'bg-purple-100 text-purple-800'" class="uppercase font-semibold text-[10px] px-2 py-0.5 rounded" x-text="l.gateway"></span>
@@ -593,7 +593,7 @@ export function renderConfigView(configs, logsData, flashMessage = null, queryPa
               <tr class="hover:bg-gray-50 transition cursor-pointer" @click="inspectRequest(req)">
                 <td class="py-2.5 px-4 font-mono">
                   <div class="font-bold text-gray-800 text-[11px]" x-text="req.request_id"></div>
-                  <div class="text-[10px] text-gray-400" x-text="req.created_at"></div>
+                  <div class="text-[10px] text-gray-400" :title="req.created_at" x-text="formatDate(req.created_at)"></div>
                 </td>
                 
                 <td class="py-2.5 px-4">
@@ -913,6 +913,8 @@ export function renderConfigView(configs, logsData, flashMessage = null, queryPa
                 <div><strong>Amount:</strong> TZS <span x-text="modalLog.amount"></span></div>
                 <div><strong>Phone:</strong> <span x-text="modalLog.phone"></span></div>
                 <div><strong>Status:</strong> <span class="uppercase font-bold" x-text="modalLog.status"></span></div>
+                <div><strong>Created:</strong> <span :title="modalLog.created_at" x-text="formatDate(modalLog.created_at)"></span></div>
+                <div><strong>Updated:</strong> <span :title="modalLog.updated_at" x-text="formatDate(modalLog.updated_at)"></span></div>
               </div>
 
               <div class="space-y-3">
@@ -961,6 +963,7 @@ export function renderConfigView(configs, logsData, flashMessage = null, queryPa
                 <div><span class="text-gray-400 block text-[10px]">HTTP STATUS</span><span class="font-bold" :class="selectedReq.status_code >= 400 ? 'text-red-600' : 'text-emerald-600'" x-text="selectedReq.status_code || 'ERR'"></span></div>
                 <div><span class="text-gray-400 block text-[10px]">LATENCY</span><span class="font-bold text-gray-900" x-text="selectedReq.duration_ms + ' ms'"></span></div>
                 <div><span class="text-gray-400 block text-[10px]">EXTERNAL REF</span><span class="font-bold text-indigo-600" x-text="selectedReq.external_reference || 'N/A'"></span></div>
+                <div class="col-span-2 md:col-span-4"><span class="text-gray-400 block text-[10px]">TIME</span><span class="font-bold text-gray-900" :title="selectedReq.created_at" x-text="formatDate(selectedReq.created_at)"></span></div>
               </div>
 
               <!-- Request Headers & Body -->
@@ -1001,6 +1004,17 @@ export function renderConfigView(configs, logsData, flashMessage = null, queryPa
     function configDashboard() {
       return {
         activeTab: new URLSearchParams(window.location.search).get('tab') || 'general',
+
+        // Turn an ISO timestamp (e.g. 2026-10-16T05:44:17.092Z) into "16 Oct 2026, 08:44:17" in the viewer's local time zone
+        formatDate(value) {
+          if (!value) return 'N/A';
+          const d = new Date(value);
+          if (isNaN(d.getTime())) return value;
+          return d.toLocaleString('en-GB', {
+            day: '2-digit', month: 'short', year: 'numeric',
+            hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+          });
+        },
         showModal: false,
         modalLog: null,
         saving: false,
