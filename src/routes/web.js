@@ -193,6 +193,7 @@ webRoutes.post('/config/save', async (c) => {
     'live_azampay_api_key',
     'live_azampay_callback_user',
     'live_azampay_callback_password',
+    'live_azampay_require_signed_callbacks',
     // Sandbox
     'sandbox_selcom_base_url',
     'sandbox_selcom_api_key',
@@ -206,7 +207,14 @@ webRoutes.post('/config/save', async (c) => {
     'sandbox_azampay_api_key',
     'sandbox_azampay_callback_user',
     'sandbox_azampay_callback_password',
+    'sandbox_azampay_require_signed_callbacks',
   ];
+
+  for (const flag of ['live_azampay_require_signed_callbacks', 'sandbox_azampay_require_signed_callbacks']) {
+    if (body[flag] !== undefined) {
+      body[flag] = ['1', 'true', 'yes', 'on'].includes(String(body[flag]).toLowerCase()) ? '1' : '0';
+    }
+  }
 
   if (body.pending_timeout_minutes !== undefined) {
     const n = parseInt(String(body.pending_timeout_minutes).trim(), 10);
@@ -705,6 +713,27 @@ webRoutes.post('/requests/bulk-delete', async (c) => {
 });
 
 // Interactive Status Check Route for Admin UI
+// Fetch (or refresh) AzamPay's callback-signing public key for the chosen environment
+webRoutes.post('/config/azampay/refresh-public-key', async (c) => {
+  const dbClient = new DbClient(c.env.DB);
+  const body = await c.req.json().catch(() => ({}));
+  const env = body.environment === 'sandbox' ? 'sandbox' : body.environment === 'live' ? 'live' : null;
+  const targetEnv = env || (await dbClient.getConfig('environment_mode', 'sandbox'));
+
+  const gateway = await new PaymentProcessorManager().getGateway(dbClient, 'azampay');
+  const pem = await gateway.fetchCallbackPublicKey(dbClient, targetEnv);
+  if (!pem) {
+    return c.json({ success: false, message: `Could not fetch the AzamPay public key for the ${targetEnv} environment. Check the base URL and credentials, then see the Request Inspector for the response.` }, 502);
+  }
+  return c.json({
+    success: true,
+    environment: targetEnv,
+    fetched_at: await dbClient.getConfig(`${targetEnv}_azampay_public_key_fetched_at`, ''),
+    public_key: pem,
+    message: `AzamPay ${targetEnv} public key fetched and cached. Signed callbacks will now be verified with it.`,
+  });
+});
+
 webRoutes.post('/check-status-interactive', async (c) => {
   const dbClient = new DbClient(c.env.DB);
   const body = await c.req.json().catch(() => ({}));

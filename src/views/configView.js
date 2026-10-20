@@ -29,6 +29,9 @@ export function renderConfigView(configs, logsData, flashMessage = null, queryPa
   const liveAzamApiKey = configs.live_azampay_api_key || configs.azampay_api_key || '';
   const liveAzamCallbackUser = configs.live_azampay_callback_user || '';
   const liveAzamCallbackPassword = configs.live_azampay_callback_password || '';
+  const liveAzamRequireSigned = ['1', 'true', 'yes', 'on'].includes(String(configs.live_azampay_require_signed_callbacks || '').toLowerCase());
+  const liveAzamPublicKeyFetchedAt = configs.live_azampay_public_key_fetched_at || '';
+  const liveAzamHasPublicKey = !!(configs.live_azampay_public_key || '').trim();
 
   // Sandbox AzamPay Configs
   const sandboxAzamBaseUrl = configs.sandbox_azampay_base_url || '';
@@ -39,6 +42,9 @@ export function renderConfigView(configs, logsData, flashMessage = null, queryPa
   const sandboxAzamApiKey = configs.sandbox_azampay_api_key || '';
   const sandboxAzamCallbackUser = configs.sandbox_azampay_callback_user || '';
   const sandboxAzamCallbackPassword = configs.sandbox_azampay_callback_password || '';
+  const sandboxAzamRequireSigned = ['1', 'true', 'yes', 'on'].includes(String(configs.sandbox_azampay_require_signed_callbacks || '').toLowerCase());
+  const sandboxAzamPublicKeyFetchedAt = configs.sandbox_azampay_public_key_fetched_at || '';
+  const sandboxAzamHasPublicKey = !!(configs.sandbox_azampay_public_key || '').trim();
 
   // Live Selcom Configs
   const liveSelcomBaseUrl = configs.live_selcom_base_url || configs.selcom_base_url || 'https://apigw.selcom.tz/v1';
@@ -269,6 +275,23 @@ export function renderConfigView(configs, logsData, flashMessage = null, queryPa
                 </button>
               </div>
             </div>
+            <div class="border-t pt-4 space-y-3">
+              <div class="text-xs font-bold text-gray-800">Callback Signature Verification</div>
+              <p class="text-[11px] text-gray-500">AzamPay signs every callback (RSA-SHA256 over <code>utilityref + externalreference + transactionstatus + operator</code>). The processor verifies it with AzamPay's public key, which it fetches from <code>/azampay/v1/public-key</code> and caches for 24 hours.</p>
+              <div class="flex flex-wrap items-center gap-3 bg-gray-50 border border-gray-200 rounded p-3">
+                <div class="text-[11px] text-gray-700 flex-1 min-w-[200px]">
+                  <span class="font-semibold">Live public key:</span>
+                  <span x-text="azamPublicKey.live.has ? ('cached ' + formatDate(azamPublicKey.live.fetched_at)) : 'not fetched yet (fetched automatically on the first signed callback)'"></span>
+                </div>
+                <button type="button" @click="refreshAzamPublicKey('live')" :disabled="azamPublicKey.live.loading" class="px-3 py-1.5 bg-red-50 text-red-700 hover:bg-red-100 border border-red-200 rounded text-xs font-medium flex items-center gap-1.5 disabled:opacity-50">
+                  <i class="fa-solid" :class="azamPublicKey.live.loading ? 'fa-spinner fa-spin' : 'fa-key'"></i> Fetch Live Public Key Now
+                </button>
+              </div>
+              <label class="flex items-start gap-2 text-xs text-gray-700">
+                <input type="checkbox" x-model="form.live_azampay_require_signed_callbacks" true-value="1" false-value="0" class="mt-0.5 rounded border-gray-300">
+                <span><span class="font-semibold">Require signed callbacks (live).</span> Reject any live callback that has no RSA signature. Turn this on once you have confirmed in the Request Inspector that every real AzamPay callback carries a <code>signature</code>. While off, an unsigned callback is only accepted if it quotes the gateway reference issued at initiation with a matching amount and phone.</span>
+              </label>
+            </div>
             <div class="border-t pt-4">
               <p class="text-[11px] text-gray-500 mb-3">Optional. If you set a callback <em>user</em> / <em>password</em> in the AzamPay merchant portal, enter the same values here. Callbacks are then accepted only when they carry these credentials. Leave blank to accept callbacks that quote the gateway reference issued at initiation.</p>
               <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -336,6 +359,21 @@ export function renderConfigView(configs, logsData, flashMessage = null, queryPa
                   <i class="fa-solid" :class="show ? 'fa-eye-slash text-indigo-600' : 'fa-eye'"></i>
                 </button>
               </div>
+            </div>
+            <div class="border-t pt-4 space-y-3">
+              <div class="flex flex-wrap items-center gap-3 bg-gray-50 border border-gray-200 rounded p-3">
+                <div class="text-[11px] text-gray-700 flex-1 min-w-[200px]">
+                  <span class="font-semibold">Sandbox public key:</span>
+                  <span x-text="azamPublicKey.sandbox.has ? ('cached ' + formatDate(azamPublicKey.sandbox.fetched_at)) : 'not fetched yet'"></span>
+                </div>
+                <button type="button" @click="refreshAzamPublicKey('sandbox')" :disabled="azamPublicKey.sandbox.loading" class="px-3 py-1.5 bg-amber-50 text-amber-700 hover:bg-amber-100 border border-amber-200 rounded text-xs font-medium flex items-center gap-1.5 disabled:opacity-50">
+                  <i class="fa-solid" :class="azamPublicKey.sandbox.loading ? 'fa-spinner fa-spin' : 'fa-key'"></i> Fetch Sandbox Public Key Now
+                </button>
+              </div>
+              <label class="flex items-start gap-2 text-xs text-gray-700">
+                <input type="checkbox" x-model="form.sandbox_azampay_require_signed_callbacks" true-value="1" false-value="0" class="mt-0.5 rounded border-gray-300">
+                <span><span class="font-semibold">Require signed callbacks (sandbox).</span> Leave off when the sandbox points at the local emulator, which signs with an HMAC header instead.</span>
+              </label>
             </div>
             <div class="border-t pt-4">
               <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -1102,6 +1140,7 @@ export function renderConfigView(configs, logsData, flashMessage = null, queryPa
           live_azampay_api_key: '${liveAzamApiKey}',
           live_azampay_callback_user: '${liveAzamCallbackUser}',
           live_azampay_callback_password: '${liveAzamCallbackPassword}',
+          live_azampay_require_signed_callbacks: '${liveAzamRequireSigned ? '1' : '0'}',
 
           sandbox_azampay_base_url: '${sandboxAzamBaseUrl}',
           sandbox_azampay_auth_base_url: '${sandboxAzamAuthBaseUrl}',
@@ -1111,6 +1150,7 @@ export function renderConfigView(configs, logsData, flashMessage = null, queryPa
           sandbox_azampay_api_key: '${sandboxAzamApiKey}',
           sandbox_azampay_callback_user: '${sandboxAzamCallbackUser}',
           sandbox_azampay_callback_password: '${sandboxAzamCallbackPassword}',
+          sandbox_azampay_require_signed_callbacks: '${sandboxAzamRequireSigned ? '1' : '0'}',
 
           live_selcom_base_url: '${liveSelcomBaseUrl}',
           live_selcom_vendor: '${liveSelcomVendor}',
@@ -1121,6 +1161,12 @@ export function renderConfigView(configs, logsData, flashMessage = null, queryPa
           sandbox_selcom_vendor: '${sandboxSelcomVendor}',
           sandbox_selcom_api_key: '${sandboxSelcomApiKey}',
           sandbox_selcom_secret_key: '${sandboxSelcomSecretKey}',
+        },
+
+        // AzamPay callback public key status
+        azamPublicKey: {
+          live: { has: ${liveAzamHasPublicKey ? 'true' : 'false'}, fetched_at: '${liveAzamPublicKeyFetchedAt}', loading: false },
+          sandbox: { has: ${sandboxAzamHasPublicKey ? 'true' : 'false'}, fetched_at: '${sandboxAzamPublicKeyFetchedAt}', loading: false },
         },
 
         // Payment Logs state
@@ -1187,6 +1233,30 @@ export function renderConfigView(configs, logsData, flashMessage = null, queryPa
             this.showToast('error', 'Error', e.message);
           } finally {
             this.saving = false;
+          }
+        },
+
+        async refreshAzamPublicKey(environment) {
+          const slot = this.azamPublicKey[environment];
+          slot.loading = true;
+          try {
+            const res = await fetch('/config/azampay/refresh-public-key', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+              body: JSON.stringify({ environment }),
+            });
+            const data = await res.json();
+            if (data.success) {
+              slot.has = true;
+              slot.fetched_at = data.fetched_at || new Date().toISOString();
+              this.showToast('success', 'Public Key Cached', data.message);
+            } else {
+              this.showToast('error', 'Fetch Failed', data.message || 'Could not fetch the public key.');
+            }
+          } catch (e) {
+            this.showToast('error', 'Error', e.message);
+          } finally {
+            slot.loading = false;
           }
         },
 

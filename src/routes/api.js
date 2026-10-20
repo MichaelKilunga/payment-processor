@@ -442,7 +442,9 @@ function detectGatewayFromBody(bodyData) {
  * Security model:
  *  - The transaction is resolved from OUR database first, so the body cannot
  *    choose which gateway's verifier runs.
- *  - A cryptographically valid gateway signature is trusted directly.
+ *  - A cryptographically valid gateway signature is trusted directly (AzamPay:
+ *    RSA-SHA256 over utilityref+externalreference+transactionstatus+operator,
+ *    verified with the public key fetched from /azampay/v1/public-key).
  *  - A callback without a signature (or with a stale timestamp) is treated as a
  *    hint only: the processor queries the gateway's status API and applies what
  *    the gateway says, never what the callback claims.

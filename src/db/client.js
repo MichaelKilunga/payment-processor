@@ -180,6 +180,9 @@ export class DbClient {
       'live_azampay_api_key',
       'live_azampay_callback_user',
       'live_azampay_callback_password',
+      'live_azampay_require_signed_callbacks',
+      'live_azampay_public_key',
+      'live_azampay_public_key_fetched_at',
       // Sandbox Keys
       'sandbox_selcom_base_url',
       'sandbox_selcom_api_key',
@@ -193,6 +196,9 @@ export class DbClient {
       'sandbox_azampay_api_key',
       'sandbox_azampay_callback_user',
       'sandbox_azampay_callback_password',
+      'sandbox_azampay_require_signed_callbacks',
+      'sandbox_azampay_public_key',
+      'sandbox_azampay_public_key_fetched_at',
     ];
 
     const result = await this.db.prepare('SELECT key, value FROM configs').all();

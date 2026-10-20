@@ -1,6 +1,13 @@
 import { hmacSha256, safeEqual } from '../utils/security.js';
 import { logOutboundRequest } from '../utils/outboundLogger.js';
 
+function base64ToBytes(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
 export class AzamPayGateway {
   getName() {
     return 'azampay';
@@ -391,25 +398,190 @@ export class AzamPayGateway {
   }
 
   /**
+   * Obtain a bearer token for the checkout API (token endpoint is logged as an
+   * outbound request like every other gateway call).
+   */
+  async getAccessToken(dbClient, targetEnv = null, externalReference = null) {
+    const rawAuthBaseUrl = await dbClient.getGatewayConfig('azampay', 'auth_base_url', targetEnv);
+    if (!rawAuthBaseUrl) return null;
+    const authBaseUrl = rawAuthBaseUrl.trim().replace(/\/+$/, '').replace(/\/AppRegistration\/GenerateToken\/?$/i, '');
+
+    const tokenBody = {
+      appName: ((await dbClient.getGatewayConfig('azampay', 'app_name', targetEnv)) || '').trim(),
+      clientId: ((await dbClient.getGatewayConfig('azampay', 'client_id', targetEnv)) || '').trim(),
+      clientSecret: ((await dbClient.getGatewayConfig('azampay', 'client_secret', targetEnv)) || '').trim(),
+    };
+
+    const start = Date.now();
+    const res = await fetch(`${authBaseUrl}/AppRegistration/GenerateToken`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify(tokenBody),
+      signal: AbortSignal.timeout(5000),
+    });
+    const text = await res.text().catch(() => '');
+    let data = null;
+    try { data = JSON.parse(text); } catch (e) {}
+
+    await logOutboundRequest(dbClient, {
+      method: 'POST',
+      url: `${authBaseUrl}/AppRegistration/GenerateToken`,
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      requestBody: tokenBody,
+      responseStatus: res.status,
+      responseBody: data || text,
+      durationMs: Date.now() - start,
+      externalReference,
+      gateway: 'azampay',
+    });
+
+    return data ? data.token || data.data?.accessToken || data.data?.token || data.accessToken || null : null;
+  }
+
+  /**
+   * Fetch AzamPay's callback-signing public key (GET /azampay/v1/public-key)
+   * and cache it in the configs table for the active environment.
+   * Returns the PEM string, or null when it could not be fetched.
+   */
+  async fetchCallbackPublicKey(dbClient, targetEnv = null) {
+    const env = targetEnv || (await dbClient.getConfig('environment_mode', 'sandbox'));
+    const rawBaseUrl = await dbClient.getGatewayConfig('azampay', 'base_url', env);
+    if (!rawBaseUrl) return null;
+    const baseUrl = rawBaseUrl.trim().replace(/\/+$/, '').replace(/\/azampay\/mno\/checkout\/?$/i, '');
+
+    let token = null;
+    try {
+      token = await this.getAccessToken(dbClient, env);
+    } catch (e) {
+      console.error('AzamPay token error while fetching public key:', e);
+    }
+    if (!token) return null;
+
+    const url = `${baseUrl}/azampay/v1/public-key?format=Pem`;
+    const headers = { Authorization: `Bearer ${token}`, Accept: 'application/json' };
+    const apiKey = ((await dbClient.getGatewayConfig('azampay', 'api_key', env)) || '').trim();
+    if (apiKey) headers['X-API-KEY'] = apiKey;
+
+    const start = Date.now();
+    let res;
+    let text = '';
+    let data = null;
+    try {
+      res = await fetch(url, { method: 'GET', headers, signal: AbortSignal.timeout(5000) });
+      text = await res.text().catch(() => '');
+      try { data = JSON.parse(text); } catch (e) {}
+    } catch (e) {
+      console.error('AzamPay public key fetch failed:', e);
+      return null;
+    }
+
+    await logOutboundRequest(dbClient, {
+      method: 'GET',
+      url,
+      headers,
+      requestBody: null,
+      responseStatus: res.status,
+      responseBody: data || text,
+      durationMs: Date.now() - start,
+      externalReference: null,
+      gateway: 'azampay',
+    });
+
+    const pem = data && typeof data.publicKey === 'string' ? data.publicKey.trim() : '';
+    if (!res.ok || !pem.includes('BEGIN PUBLIC KEY')) {
+      console.warn(`AzamPay public key endpoint returned HTTP ${res.status}: ${text.slice(0, 200)}`);
+      return null;
+    }
+
+    await dbClient.setConfig(`${env}_azampay_public_key`, pem);
+    await dbClient.setConfig(`${env}_azampay_public_key_fetched_at`, new Date().toISOString());
+    return pem;
+  }
+
+  /**
+   * Cached public key for the active environment; refreshed after 24h or on demand.
+   */
+  async getCallbackPublicKey(dbClient, { forceRefresh = false } = {}) {
+    const env = await dbClient.getConfig('environment_mode', 'sandbox');
+    if (!forceRefresh) {
+      const cached = ((await dbClient.getConfig(`${env}_azampay_public_key`, '')) || '').trim();
+      const fetchedAt = Date.parse((await dbClient.getConfig(`${env}_azampay_public_key_fetched_at`, '')) || '');
+      const fresh = Number.isFinite(fetchedAt) && Date.now() - fetchedAt < 24 * 3600 * 1000;
+      if (cached && fresh) return cached;
+      if (cached) {
+        // Stale but usable: try to refresh, fall back to the cached copy.
+        const refreshed = await this.fetchCallbackPublicKey(dbClient, env);
+        return refreshed || cached;
+      }
+    }
+    return this.fetchCallbackPublicKey(dbClient, env);
+  }
+
+  /**
+   * AzamPay callback signature (documented at
+   * developerdocs.azampay.co.tz/tanzania/checkout-api#callback):
+   *   data      = utilityref + externalreference + transactionstatus + operator
+   *   signature = Base64( RSA-SHA256-PKCS1v1.5( data ) )
+   */
+  async verifyRsaCallbackSignature(publicKeyPem, bodyData, signatureBase64) {
+    try {
+      const data = [bodyData.utilityref, bodyData.externalreference, bodyData.transactionstatus, bodyData.operator]
+        .map((v) => (v === undefined || v === null ? '' : String(v)))
+        .join('');
+
+      const der = base64ToBytes(
+        String(publicKeyPem)
+          .replace(/-----BEGIN PUBLIC KEY-----/g, '')
+          .replace(/-----END PUBLIC KEY-----/g, '')
+          .replace(/\s+/g, '')
+      );
+      const key = await crypto.subtle.importKey('spki', der, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify']);
+      const sig = base64ToBytes(String(signatureBase64).replace(/\s+/g, ''));
+      return await crypto.subtle.verify('RSASSA-PKCS1-v1_5', key, sig, new TextEncoder().encode(data));
+    } catch (e) {
+      console.error('AzamPay RSA signature verification error:', e);
+      return false;
+    }
+  }
+
+  /**
    * Returns 'valid' | 'invalid' | 'unsigned'.
    * Unsigned callbacks are not trusted by the caller; it confirms the status
    * with checkTransactionStatus() instead of applying the callback body.
    */
   async verifyWebhookSignature(dbClient, headers, rawBody, bodyData = {}) {
     // 1. Header HMAC (used by the built-in emulator; real AzamPay does not send it)
-    const signature = headers.get('x-signature') || headers.get('signature');
-    if (signature) {
+    const headerSignature = headers.get('x-signature') || headers.get('signature');
+    if (headerSignature) {
       const secret = ((await dbClient.getGatewayConfig('azampay', 'client_secret')) || '').trim();
       if (secret) {
         const computed = await hmacSha256(secret, rawBody || '');
-        const provided = String(signature).trim().replace(/^sha256=/i, '').toLowerCase();
+        const provided = String(headerSignature).trim().replace(/^sha256=/i, '').toLowerCase();
         return safeEqual(provided, computed) ? 'valid' : 'invalid';
       }
     }
 
-    // 2. Callback credentials. AzamPay's merchant portal can be configured to send
-    //    a user/password pair inside the callback body ("user" / "password").
-    //    When a callback password is configured here, every callback must carry it.
+    // 2. RSA signature in the body (real AzamPay callbacks). Verified with the
+    //    public key AzamPay publishes; the key is re-fetched once on failure, as
+    //    their docs recommend, before the callback is rejected.
+    const bodySignature = bodyData && typeof bodyData.signature === 'string' ? bodyData.signature.trim() : '';
+    if (bodySignature) {
+      let pem = await this.getCallbackPublicKey(dbClient);
+      if (pem && (await this.verifyRsaCallbackSignature(pem, bodyData, bodySignature))) {
+        return 'valid';
+      }
+      const refreshed = await this.getCallbackPublicKey(dbClient, { forceRefresh: true });
+      if (refreshed && refreshed !== pem && (await this.verifyRsaCallbackSignature(refreshed, bodyData, bodySignature))) {
+        return 'valid';
+      }
+      if (!pem && !refreshed) {
+        console.warn('AzamPay callback is signed but the public key could not be fetched; treating as unsigned.');
+        return 'unsigned';
+      }
+      return 'invalid';
+    }
+
+    // 3. Callback credentials (user/password in the body), if configured here.
     const expectedPassword = ((await dbClient.getGatewayConfig('azampay', 'callback_password')) || '').trim();
     if (expectedPassword) {
       const expectedUser = ((await dbClient.getGatewayConfig('azampay', 'callback_user')) || '').trim();
@@ -420,8 +592,13 @@ export class AzamPayGateway {
       return passwordOk && userOk ? 'valid' : 'invalid';
     }
 
-    // AzamPay also puts an opaque RSA "signature" field in the body, but does not
-    // publish the verification key or scheme, so it cannot be checked here.
+    // 4. No signature at all. Rejected outright when signed callbacks are
+    //    required; otherwise left to the caller's reference-match fallback.
+    const requireSigned = String((await dbClient.getGatewayConfig('azampay', 'require_signed_callbacks')) || '').trim();
+    if (['1', 'true', 'yes', 'on'].includes(requireSigned.toLowerCase())) {
+      console.warn('AzamPay callback rejected: no signature and signed callbacks are required.');
+      return 'invalid';
+    }
     return 'unsigned';
   }
 
