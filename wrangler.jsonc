@@ -6,6 +6,10 @@
   "compatibility_flags": [
     "nodejs_compat"
   ],
+  // Every 5 minutes: expire transactions that stayed "pending" past the configured timeout.
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  },
   // Cloudflare Rate Limiting bindings (period must be 10 or 60 seconds).
   // The code falls back to a per-isolate in-memory limiter when these are absent (e.g. older wrangler).
   "ratelimits": [

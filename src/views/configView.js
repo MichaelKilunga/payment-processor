@@ -18,6 +18,7 @@ export function renderConfigView(configs, logsData, flashMessage = null, queryPa
   const envMode = configs.environment_mode || 'sandbox';
   const activeGateway = configs.active_gateway || 'selcom';
   const webappCallbackUrl = configs.webapp_callback_url || '';
+  const pendingTimeoutMinutes = configs.pending_timeout_minutes !== '' && configs.pending_timeout_minutes != null ? configs.pending_timeout_minutes : '30';
 
   // Live AzamPay Configs
   const liveAzamBaseUrl = configs.live_azampay_base_url || configs.azampay_base_url || 'https://checkout.azampay.co.tz';
@@ -26,6 +27,8 @@ export function renderConfigView(configs, logsData, flashMessage = null, queryPa
   const liveAzamClientSecret = configs.live_azampay_client_secret || configs.azampay_client_secret || '';
   const liveAzamAppName = configs.live_azampay_app_name || configs.azampay_app_name || '';
   const liveAzamApiKey = configs.live_azampay_api_key || configs.azampay_api_key || '';
+  const liveAzamCallbackUser = configs.live_azampay_callback_user || '';
+  const liveAzamCallbackPassword = configs.live_azampay_callback_password || '';
 
   // Sandbox AzamPay Configs
   const sandboxAzamBaseUrl = configs.sandbox_azampay_base_url || '';
@@ -34,6 +37,8 @@ export function renderConfigView(configs, logsData, flashMessage = null, queryPa
   const sandboxAzamClientSecret = configs.sandbox_azampay_client_secret || '';
   const sandboxAzamAppName = configs.sandbox_azampay_app_name || '';
   const sandboxAzamApiKey = configs.sandbox_azampay_api_key || '';
+  const sandboxAzamCallbackUser = configs.sandbox_azampay_callback_user || '';
+  const sandboxAzamCallbackPassword = configs.sandbox_azampay_callback_password || '';
 
   // Live Selcom Configs
   const liveSelcomBaseUrl = configs.live_selcom_base_url || configs.selcom_base_url || 'https://apigw.selcom.tz/v1';
@@ -179,6 +184,13 @@ export function renderConfigView(configs, logsData, flashMessage = null, queryPa
             <input type="text" x-model="form.webapp_callback_url" placeholder="https://your-app.com/api/payments/callback" class="w-full rounded-md border-gray-300 border p-2.5 text-sm font-mono focus:ring-indigo-500 focus:border-indigo-500">
             <p class="text-xs text-gray-500 mt-1">Endpoint on your web app where normalized payment webhooks are delivered.</p>
           </div>
+
+          <!-- Pending timeout -->
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Pending Transaction Lifespan (minutes)</label>
+            <input type="number" min="0" max="10080" step="1" x-model="form.pending_timeout_minutes" placeholder="30" class="w-full rounded-md border-gray-300 border p-2.5 text-sm font-mono focus:ring-indigo-500 focus:border-indigo-500">
+            <p class="text-xs text-gray-500 mt-1">A payment still <strong>pending</strong> after this long (customer ignored or cancelled the USSD prompt) is marked <strong>failed</strong> and your web app is notified. Checked every 5 minutes and on every status query. Set 0 to disable. A late success callback from the gateway still upgrades it to success.</p>
+          </div>
         </div>
       </div>
 
@@ -257,6 +269,24 @@ export function renderConfigView(configs, logsData, flashMessage = null, queryPa
                 </button>
               </div>
             </div>
+            <div class="border-t pt-4">
+              <p class="text-[11px] text-gray-500 mb-3">Optional. If you set a callback <em>user</em> / <em>password</em> in the AzamPay merchant portal, enter the same values here. Callbacks are then accepted only when they carry these credentials. Leave blank to accept callbacks that quote the gateway reference issued at initiation.</p>
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label class="block text-xs font-medium text-gray-700 mb-1">Live Callback User</label>
+                  <input type="text" x-model="form.live_azampay_callback_user" class="w-full rounded-md border-gray-300 border p-2 text-xs font-mono">
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-gray-700 mb-1">Live Callback Password</label>
+                  <div x-data="{ show: false }" class="relative">
+                    <input :type="show ? 'text' : 'password'" x-model="form.live_azampay_callback_password" class="w-full rounded-md border-gray-300 border p-2 pr-10 text-xs font-mono">
+                    <button type="button" @click="show = !show" class="absolute inset-y-0 right-0 pr-3 flex items-center text-gray-400 hover:text-gray-600 focus:outline-none" title="Toggle visibility">
+                      <i class="fa-solid" :class="show ? 'fa-eye-slash text-indigo-600' : 'fa-eye'"></i>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -305,6 +335,23 @@ export function renderConfigView(configs, logsData, flashMessage = null, queryPa
                 <button type="button" @click="show = !show" class="absolute inset-y-0 right-0 pr-3 flex items-center text-gray-400 hover:text-gray-600 focus:outline-none" title="Toggle visibility">
                   <i class="fa-solid" :class="show ? 'fa-eye-slash text-indigo-600' : 'fa-eye'"></i>
                 </button>
+              </div>
+            </div>
+            <div class="border-t pt-4">
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label class="block text-xs font-medium text-gray-700 mb-1">Sandbox Callback User</label>
+                  <input type="text" x-model="form.sandbox_azampay_callback_user" class="w-full rounded-md border-gray-300 border p-2 text-xs font-mono">
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-gray-700 mb-1">Sandbox Callback Password</label>
+                  <div x-data="{ show: false }" class="relative">
+                    <input :type="show ? 'text' : 'password'" x-model="form.sandbox_azampay_callback_password" class="w-full rounded-md border-gray-300 border p-2 pr-10 text-xs font-mono">
+                    <button type="button" @click="show = !show" class="absolute inset-y-0 right-0 pr-3 flex items-center text-gray-400 hover:text-gray-600 focus:outline-none" title="Toggle visibility">
+                      <i class="fa-solid" :class="show ? 'fa-eye-slash text-indigo-600' : 'fa-eye'"></i>
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -1045,13 +1092,16 @@ export function renderConfigView(configs, logsData, flashMessage = null, queryPa
           environment_mode: '${envMode}',
           active_gateway: '${activeGateway}',
           webapp_callback_url: '${webappCallbackUrl}',
-          
+          pending_timeout_minutes: '${pendingTimeoutMinutes}',
+
           live_azampay_base_url: '${liveAzamBaseUrl}',
           live_azampay_auth_base_url: '${liveAzamAuthBaseUrl}',
           live_azampay_app_name: '${liveAzamAppName}',
           live_azampay_client_id: '${liveAzamClientId}',
           live_azampay_client_secret: '${liveAzamClientSecret}',
           live_azampay_api_key: '${liveAzamApiKey}',
+          live_azampay_callback_user: '${liveAzamCallbackUser}',
+          live_azampay_callback_password: '${liveAzamCallbackPassword}',
 
           sandbox_azampay_base_url: '${sandboxAzamBaseUrl}',
           sandbox_azampay_auth_base_url: '${sandboxAzamAuthBaseUrl}',
@@ -1059,6 +1109,8 @@ export function renderConfigView(configs, logsData, flashMessage = null, queryPa
           sandbox_azampay_client_id: '${sandboxAzamClientId}',
           sandbox_azampay_client_secret: '${sandboxAzamClientSecret}',
           sandbox_azampay_api_key: '${sandboxAzamApiKey}',
+          sandbox_azampay_callback_user: '${sandboxAzamCallbackUser}',
+          sandbox_azampay_callback_password: '${sandboxAzamCallbackPassword}',
 
           live_selcom_base_url: '${liveSelcomBaseUrl}',
           live_selcom_vendor: '${liveSelcomVendor}',

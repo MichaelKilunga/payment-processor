@@ -155,6 +155,7 @@ export class DbClient {
       'environment_mode',
       'active_gateway',
       'webapp_callback_url',
+      'pending_timeout_minutes',
       // Legacy keys
       'selcom_base_url',
       'selcom_api_key',
@@ -177,6 +178,8 @@ export class DbClient {
       'live_azampay_client_secret',
       'live_azampay_app_name',
       'live_azampay_api_key',
+      'live_azampay_callback_user',
+      'live_azampay_callback_password',
       // Sandbox Keys
       'sandbox_selcom_base_url',
       'sandbox_selcom_api_key',
@@ -188,6 +191,8 @@ export class DbClient {
       'sandbox_azampay_client_secret',
       'sandbox_azampay_app_name',
       'sandbox_azampay_api_key',
+      'sandbox_azampay_callback_user',
+      'sandbox_azampay_callback_password',
     ];
 
     const result = await this.db.prepare('SELECT key, value FROM configs').all();
@@ -285,6 +290,14 @@ export class DbClient {
       .bind(gatewayReference)
       .first();
     return this.parseLogItem(row);
+  }
+
+  async getStalePendingLogs(cutoffIso, limit = 50) {
+    const result = await this.db
+      .prepare('SELECT * FROM payment_logs WHERE status = ? AND created_at <= ? ORDER BY created_at ASC LIMIT ?')
+      .bind('pending', cutoffIso, limit)
+      .all();
+    return (result.results || []).map((row) => this.parseLogItem(row));
   }
 
   async findPaymentLogById(id) {

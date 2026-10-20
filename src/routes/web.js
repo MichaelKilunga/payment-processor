@@ -168,6 +168,7 @@ webRoutes.post('/config/save', async (c) => {
     'environment_mode',
     'active_gateway',
     'webapp_callback_url',
+    'pending_timeout_minutes',
     // Legacy
     'selcom_base_url',
     'selcom_api_key',
@@ -190,6 +191,8 @@ webRoutes.post('/config/save', async (c) => {
     'live_azampay_client_secret',
     'live_azampay_app_name',
     'live_azampay_api_key',
+    'live_azampay_callback_user',
+    'live_azampay_callback_password',
     // Sandbox
     'sandbox_selcom_base_url',
     'sandbox_selcom_api_key',
@@ -201,7 +204,23 @@ webRoutes.post('/config/save', async (c) => {
     'sandbox_azampay_client_secret',
     'sandbox_azampay_app_name',
     'sandbox_azampay_api_key',
+    'sandbox_azampay_callback_user',
+    'sandbox_azampay_callback_password',
   ];
+
+  if (body.pending_timeout_minutes !== undefined) {
+    const n = parseInt(String(body.pending_timeout_minutes).trim(), 10);
+    if (!Number.isFinite(n) || n < 0 || n > 10080) {
+      const msg = 'Pending timeout must be a whole number of minutes between 0 and 10080 (0 disables expiry).';
+      if (isJsonReq) return c.json({ success: false, message: msg }, 400);
+      const configs = await dbClient.getAllConfigs();
+      const logsData = await dbClient.getPaymentLogs({ page: 1, perPage: 10 });
+      const adminCreds = await getAdminCredentials(dbClient, c.env, c);
+      const integration = await getIntegrationSettings(dbClient, c.env);
+      return c.html(renderConfigView(configs, logsData, { type: 'error', text: msg }, {}, adminCreds, integration), 400);
+    }
+    body.pending_timeout_minutes = String(n);
+  }
 
   if (body.webapp_callback_url !== undefined) {
     const check = validateWebhookUrl(body.webapp_callback_url);

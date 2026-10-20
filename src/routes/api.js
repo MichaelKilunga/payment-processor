@@ -3,12 +3,91 @@ import { DbClient } from '../db/client.js';
 import { PaymentProcessorManager } from '../gateways/PaymentProcessorManager.js';
 import { requireApiClient, requireAdminSession } from '../utils/apiAuth.js';
 import { buildWebhookPayload, deliverWebhook } from '../utils/webhookDispatcher.js';
-import { rateLimit, clientIp, validateWebhookUrl } from '../utils/security.js';
+import { rateLimit, clientIp, validateWebhookUrl, safeEqual } from '../utils/security.js';
 
 export const apiRoutes = new Hono();
 const manager = new PaymentProcessorManager();
 
 const FINAL_STATUSES = ['success', 'failed'];
+
+const DEFAULT_PENDING_TIMEOUT_MINUTES = 30;
+
+/**
+ * How long (in minutes) a transaction may stay "pending" before the processor
+ * gives up on it. 0 disables expiry.
+ */
+export async function getPendingTimeoutMinutes(dbClient) {
+  const raw = await dbClient.getConfig('pending_timeout_minutes', '');
+  if (raw === '' || raw === null || raw === undefined) return DEFAULT_PENDING_TIMEOUT_MINUTES;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : DEFAULT_PENDING_TIMEOUT_MINUTES;
+}
+
+/**
+ * Marks a pending transaction as failed once it has outlived the configured
+ * pending timeout, and notifies the web app. Returns the (possibly updated) log
+ * and whether it was expired by this call.
+ *
+ * A late gateway callback reporting success is still honoured afterwards: the
+ * callback handler only refuses to downgrade a *successful* payment, so a
+ * failed-by-timeout payment can still be upgraded to success.
+ */
+export async function expirePendingIfStale(dbClient, env, log, executionCtx = null) {
+  if (!log || log.status !== 'pending') return { log, expired: false };
+
+  const timeoutMinutes = await getPendingTimeoutMinutes(dbClient);
+  if (!timeoutMinutes) return { log, expired: false };
+
+  const createdMs = Date.parse(log.created_at);
+  if (!Number.isFinite(createdMs)) return { log, expired: false };
+
+  const ageMinutes = (Date.now() - createdMs) / 60000;
+  if (ageMinutes < timeoutMinutes) return { log, expired: false };
+
+  const message = `Payment expired: no confirmation from ${log.gateway} within ${timeoutMinutes} minutes (customer did not complete the prompt).`;
+  await dbClient.updatePaymentLog(log.id, {
+    status: 'failed',
+    raw_response: {
+      ...(log.raw_response && typeof log.raw_response === 'object' ? log.raw_response : {}),
+      _expired: true,
+      _expired_at: new Date().toISOString(),
+      _expired_reason: message,
+    },
+  });
+  console.log(`Expired pending payment ${log.external_reference} after ${Math.floor(ageMinutes)} minutes`);
+
+  const fresh = await dbClient.findPaymentLogById(log.id);
+  const payload = buildWebhookPayload(fresh, message, { source: 'pending_timeout' });
+  const delivery = await deliverWebhook(dbClient, env, payload, { executionCtx });
+  if (!delivery.delivered && !delivery.skipped) {
+    console.error(`Failed to notify WebApp about expired payment ${fresh.external_reference}: ${delivery.detail}`);
+  }
+  return { log: fresh, expired: true };
+}
+
+/**
+ * Scheduled sweep: finalise pending transactions that have outlived the timeout.
+ * Each one gets a last live status check with its gateway before being expired.
+ */
+export async function sweepStalePendingPayments(dbClient, env, executionCtx = null, limit = 50) {
+  const timeoutMinutes = await getPendingTimeoutMinutes(dbClient);
+  if (!timeoutMinutes) return { checked: 0, expired: 0, finalized: 0 };
+
+  const cutoff = new Date(Date.now() - timeoutMinutes * 60000).toISOString();
+  const stale = await dbClient.getStalePendingLogs(cutoff, limit);
+  let expired = 0;
+  let finalized = 0;
+  for (const log of stale) {
+    try {
+      const res = await performStatusCheck(dbClient, log.external_reference, env, executionCtx);
+      if (res.payload && res.payload.expired) expired += 1;
+      else if (res.payload && res.payload.status !== 'pending') finalized += 1;
+    } catch (e) {
+      console.error(`Sweep failed for ${log.external_reference}:`, e);
+    }
+  }
+  return { checked: stale.length, expired, finalized };
+}
 
 function getExecutionCtx(c) {
   try {
@@ -66,6 +145,14 @@ export async function performStatusCheck(dbClient, externalRef, env = {}, execut
     }
   }
 
+  // Still pending after the live check: give up once the pending timeout has elapsed
+  let expired = false;
+  if (log.status === 'pending') {
+    const result = await expirePendingIfStale(dbClient, env, log, executionCtx);
+    log = result.log;
+    expired = result.expired;
+  }
+
   return {
     statusCode: 200,
     payload: {
@@ -76,7 +163,10 @@ export async function performStatusCheck(dbClient, externalRef, env = {}, execut
       gateway: log.gateway,
       gateway_reference: log.gateway_reference,
       checked_remote: checkedRemote,
-      remote_detail: remoteCheckResult ? remoteCheckResult.message : null,
+      expired,
+      remote_detail: expired
+        ? 'Pending timeout elapsed without gateway confirmation; marked as failed.'
+        : remoteCheckResult ? remoteCheckResult.message : null,
       message:
         log.status === 'success'
           ? 'Payment completed successfully'
@@ -356,6 +446,10 @@ function detectGatewayFromBody(bodyData) {
  *  - A callback without a signature (or with a stale timestamp) is treated as a
  *    hint only: the processor queries the gateway's status API and applies what
  *    the gateway says, never what the callback claims.
+ *  - When the gateway offers no usable status API (AzamPay MNO checkout), an
+ *    unsigned callback is accepted only if it is bound to the transaction: it
+ *    must quote the gateway reference the gateway itself issued at initiation,
+ *    the amount must match, and any phone number it carries must match.
  *  - A callback with a present but invalid signature is rejected.
  *  - Amount must match the initiated amount; a completed payment is never downgraded.
  *  - Callbacks for unknown transactions are acknowledged but never forwarded.
@@ -438,6 +532,11 @@ async function handleGatewayCallback(c, explicitGateway = null) {
         message: remote.message || parsed.message,
       };
       confirmation = 'status_query';
+    } else if (callbackBoundToTransaction(log, bodyData, parsed)) {
+      // The gateway cannot be asked, but the callback quotes the gateway's own
+      // reference for this exact transaction and is consistent with our record.
+      confirmation = 'reference_match';
+      console.log(`Unsigned callback for ${log.external_reference} accepted via gateway reference match (${log.gateway_reference}).`);
     } else {
       console.warn(`Unsigned callback for ${log.external_reference} could not be confirmed with ${gatewayName}; status unchanged.`);
       return c.json(
@@ -485,6 +584,38 @@ async function handleGatewayCallback(c, explicitGateway = null) {
   }
 
   return c.json({ success: true, status: 'acknowledged', applied: true });
+}
+
+/**
+ * An unsigned callback is "bound" to a transaction when it quotes the gateway
+ * reference that the gateway issued to us at initiation (which outsiders do not
+ * know), and everything else it says agrees with our record.
+ */
+function callbackBoundToTransaction(log, bodyData, parsed) {
+  const stored = log.gateway_reference ? String(log.gateway_reference).trim() : '';
+  if (!stored) return false;
+
+  const quoted = [
+    bodyData.reference,
+    bodyData.transid,
+    bodyData.transactionId,
+    bodyData.mnoreference,
+    bodyData.externalreference,
+    bodyData.fspReferenceId,
+    parsed.gateway_reference,
+  ]
+    .filter((v) => v !== undefined && v !== null && String(v).trim() !== '')
+    .map((v) => String(v).trim());
+  if (!quoted.some((v) => safeEqual(v, stored))) return false;
+
+  if (parsed.amount > 0 && Math.abs(parsed.amount - Number(log.amount)) > 0.009) return false;
+
+  const digits = (v) => String(v || '').replace(/\D/g, '');
+  const callbackPhone = digits(parsed.phone);
+  const storedPhone = digits(log.phone);
+  if (callbackPhone && storedPhone && callbackPhone.slice(-9) !== storedPhone.slice(-9)) return false;
+
+  return true;
 }
 
 function normalizeSignatureState(result) {

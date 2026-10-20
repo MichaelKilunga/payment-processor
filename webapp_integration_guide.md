@@ -220,6 +220,13 @@ The URL must use HTTPS (plain HTTP is only accepted for localhost and private-ne
 - `status`: `"success"` or `"failed"`.
 - `gateway_reference`: Unique transaction ID issued by the gateway provider.
 - `amount`: Confirmed transaction amount.
+- `source`: What produced the notification: `gateway_callback` (the gateway called us), `status_query` (a status check confirmed it with the gateway) or `pending_timeout` (the pending lifespan elapsed, see below).
+
+#### Pending lifespan and late callbacks
+
+A USSD push the customer ignores or cancels never produces a final status from some MNOs. The processor therefore marks a payment that is still `pending` after the configured lifespan (dashboard General Settings, default 30 minutes) as `failed` and sends you a webhook with `source: "pending_timeout"`. The check runs every 5 minutes and on every status query.
+
+If the gateway later reports that the customer did pay, the processor upgrades the payment from `failed` to `success` and sends another webhook. Your handler must therefore allow a `failed` order to become `paid` later, and must never treat `failed` as permanent for refunds or stock decisions until the amount has actually been reconciled.
 
 #### 3. Verify the Webhook Signature (required)
 
@@ -310,6 +317,8 @@ Use status checks for backend verification, manual re-checks, or frontend pollin
 
 #### Automatic Live Gateway Query Fallback
 If the transaction in the middleware database is still `pending` when checked, the processor **automatically queries the gateway provider (AzamPay/Selcom) directly**. If confirmed, it updates its database, triggers the webhook callback to your web app, and returns the updated status immediately.
+
+Note that AzamPay does not expose a status query for MNO (USSD push) checkout; its final status arrives only via callback. For AzamPay the live query therefore cannot finalize a payment, and the pending lifespan (above) is what eventually resolves abandoned prompts. The status response carries `expired: true` when this check was what marked the payment `failed`.
 
 #### Endpoints
 

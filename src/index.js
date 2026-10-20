@@ -6,6 +6,7 @@ import { emulatorApiRoutes } from './routes/emulatorApi.js';
 import { webRoutes } from './routes/web.js';
 import { DbClient } from './db/client.js';
 import { getAllowedOrigins } from './utils/apiAuth.js';
+import { sweepStalePendingPayments } from './routes/api.js';
 
 const app = new Hono();
 
@@ -85,4 +86,19 @@ app.onError((err, c) => {
   return c.text(`500 Internal Server Error (reference ${errorId})`, 500);
 });
 
-export default app;
+// Cron trigger (see wrangler.jsonc "triggers"): finalise transactions that have
+// been pending longer than the configured timeout, even if nobody polls them.
+async function scheduled(event, env, ctx) {
+  const dbClient = new DbClient(env.DB);
+  try {
+    const summary = await sweepStalePendingPayments(dbClient, env, ctx);
+    console.log('Pending payment sweep:', summary);
+  } catch (e) {
+    console.error('Pending payment sweep failed:', e);
+  }
+}
+
+export default {
+  fetch: app.fetch,
+  scheduled,
+};

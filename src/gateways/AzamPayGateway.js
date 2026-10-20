@@ -345,7 +345,7 @@ export class AzamPayGateway {
       const httpStatus = lastRes ? lastRes.status : 500;
       const errorDetail =
         httpStatus === 404
-          ? `Transaction reference not found on AzamPay gateway (HTTP 404)`
+          ? `AzamPay returned HTTP 404 for every known status endpoint. AzamPay does not expose a status query for MNO checkout; the final status arrives only via callback.`
           : `AzamPay status query returned HTTP ${httpStatus}: ${lastData?.message || lastResText || 'Unknown error'}`;
 
       return {
@@ -396,19 +396,33 @@ export class AzamPayGateway {
    * with checkTransactionStatus() instead of applying the callback body.
    */
   async verifyWebhookSignature(dbClient, headers, rawBody, bodyData = {}) {
+    // 1. Header HMAC (used by the built-in emulator; real AzamPay does not send it)
     const signature = headers.get('x-signature') || headers.get('signature');
-    if (!signature) {
-      return 'unsigned';
+    if (signature) {
+      const secret = ((await dbClient.getGatewayConfig('azampay', 'client_secret')) || '').trim();
+      if (secret) {
+        const computed = await hmacSha256(secret, rawBody || '');
+        const provided = String(signature).trim().replace(/^sha256=/i, '').toLowerCase();
+        return safeEqual(provided, computed) ? 'valid' : 'invalid';
+      }
     }
 
-    const secret = ((await dbClient.getGatewayConfig('azampay', 'client_secret')) || '').trim();
-    if (!secret) {
-      return 'unsigned';
+    // 2. Callback credentials. AzamPay's merchant portal can be configured to send
+    //    a user/password pair inside the callback body ("user" / "password").
+    //    When a callback password is configured here, every callback must carry it.
+    const expectedPassword = ((await dbClient.getGatewayConfig('azampay', 'callback_password')) || '').trim();
+    if (expectedPassword) {
+      const expectedUser = ((await dbClient.getGatewayConfig('azampay', 'callback_user')) || '').trim();
+      const givenPassword = bodyData && bodyData.password != null ? String(bodyData.password) : '';
+      const givenUser = bodyData && bodyData.user != null ? String(bodyData.user) : '';
+      const passwordOk = safeEqual(givenPassword, expectedPassword);
+      const userOk = !expectedUser || safeEqual(givenUser, expectedUser);
+      return passwordOk && userOk ? 'valid' : 'invalid';
     }
 
-    const computed = await hmacSha256(secret, rawBody || '');
-    const provided = String(signature).trim().replace(/^sha256=/i, '').toLowerCase();
-    return safeEqual(provided, computed) ? 'valid' : 'invalid';
+    // AzamPay also puts an opaque RSA "signature" field in the body, but does not
+    // publish the verification key or scheme, so it cannot be checked here.
+    return 'unsigned';
   }
 
   parseCallback(data) {
